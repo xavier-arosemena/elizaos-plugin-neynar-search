@@ -38,6 +38,7 @@ Add to your agent's `character.json`:
 ```json
 {
   "plugins": ["@elizaos/plugin-neynar-search"],
+  "clients": ["direct"],
   "settings": {
     "secrets": {
       "FARCASTER_NEYNAR_API_KEY": "your-neynar-api-key"
@@ -46,7 +47,9 @@ Add to your agent's `character.json`:
 }
 ```
 
-Or set via environment variable:
+> **Important:** Use only `"direct"` in the `clients` array. The `auto` client drives autonomous posting — a read-only discovery agent must not post anything. The `direct` client exposes the HTTP endpoint that `scout_cycle.sh` calls.
+
+Or set the API key via environment variable:
 
 ```bash
 FARCASTER_NEYNAR_API_KEY=your-neynar-api-key
@@ -94,14 +97,14 @@ Queue delivered to Archon. 3 item(s). Cycle complete.
 Each cast is scored on three equal-weight axes (0–10 each), averaged to produce a final score:
 
 ### Axis 1 — Author Reach
-`log10(follower_count)` normalized to 0–10 (1M followers = 10). +1 bonus for Neynar power badge, capped at 10.
+`(log10(follower_count) / 6) * 10` normalized to 0–10 (1M followers = 10). +1 bonus for Neynar power badge, capped at 10.
 
 | Followers | Score |
 |-----------|-------|
-| 100       | 1.7   |
-| 1 000     | 3.3   |
-| 10 000    | 5.0   |
-| 100 000   | 6.7   |
+| 100       | 3.3   |
+| 1 000     | 5.0   |
+| 10 000    | 6.7   |
+| 100 000   | 8.3   |
 | 1 000 000 | 10.0  |
 
 ### Axis 2 — Engagement Velocity
@@ -148,6 +151,25 @@ This is hardcoded for the `agents-ecosystem` multi-agent setup. To adapt for a d
 | GET | `/v2/farcaster/user/casts?fid=FID&limit=10` | Target profile monitoring |
 
 **Auth**: `api_key` header. No signer UUID. Fully read-only.
+
+---
+
+## Trigger mechanism
+
+The Scout agent is driven by a cron job on the host that calls its `DirectClient` HTTP endpoint every 3 hours:
+
+```bash
+# Install on the host (run once):
+(crontab -l 2>/dev/null; echo "0 */3 * * * /root/agents-ecosystem/engine/scripts/scout_cycle.sh >> /var/log/scout_cycle.log 2>&1") | crontab -
+```
+
+The script [`scripts/scout_cycle.sh`](../../scripts/scout_cycle.sh) sends a discovery prompt via `curl` to:
+
+```
+POST http://localhost:3003/{SCOUT_AGENT_ID}/message
+```
+
+This triggers the `SEARCH_FARCASTER` action inside the container and returns the ranked queue to the shell log.
 
 ---
 
