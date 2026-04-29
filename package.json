@@ -1,0 +1,31 @@
+{
+  "name": "@elizaos/plugin-neynar-search",
+  "version": "0.1.0",
+  "description": "Read-only Farcaster engagement discovery via Neynar REST API for ElizaOS agents",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": [
+    "elizaos",
+    "eliza",
+    "plugin",
+    "farcaster",
+    "neynar",
+    "social",
+    "discovery"
+  ],
+  "author": "agents-ecosystem",
+  "license": "MIT",
+  "peerDependencies": {
+    "@elizaos/core": "0.1.9"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3"
+  }
+}
