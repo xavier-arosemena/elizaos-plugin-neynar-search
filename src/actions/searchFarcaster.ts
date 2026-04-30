@@ -46,7 +46,7 @@ const DEFAULT_KEYWORDS = [
   "energy prices Europe",
 ];
 
-const MAX_RESULTS = 10;
+const MAX_RESULTS = 5;
 const MIN_SCORE = 6;
 
 // ---------------------------------------------------------------------------
@@ -94,6 +94,11 @@ function formatQueue(opportunities: ScoredOpportunity[], timestamp: string): str
       (op.reactions?.recasts_count ?? 0) +
       (op.replies?.count ?? 0);
 
+    // Truncate suggestedAngle to 150 chars max to avoid exceeding embedding context
+    const truncatedAngle = op.suggestedAngle.length > 150
+      ? op.suggestedAngle.slice(0, 147) + "..."
+      : op.suggestedAngle;
+
     lines.push(`${i + 1}. SCORE ${op.score}/10 — @${op.author.username}`);
     lines.push(`   URL: ${op.castUrl}`);
     lines.push(
@@ -103,7 +108,7 @@ function formatQueue(opportunities: ScoredOpportunity[], timestamp: string): str
       `   Engagement: ${op.reactions.likes_count}L / ${op.reactions.recasts_count}RC / ${op.replies.count}R (${totalEng} total)`
     );
     lines.push(`   Keywords: ${op.matchedKeywords.join(", ") || "n/a"}`);
-    lines.push(`   Angle: ${op.suggestedAngle}`);
+    lines.push(`   Angle: ${truncatedAngle}`);
     lines.push("");
   }
 
@@ -120,6 +125,10 @@ function formatQueue(opportunities: ScoredOpportunity[], timestamp: string): str
  */
 async function deliverToArchon(queueText: string): Promise<void> {
   const url = `${ARCHON_BASE_URL}/${ARCHON_AGENT_ID}/message`;
+
+  elizaLogger.log(
+    `[neynar-search] Delivering queue to Archon. Length: ${queueText.length} chars. Approximate tokens: ${Math.ceil(queueText.length / 4)}`
+  );
 
   const body = JSON.stringify({
     text: `[SCOUT DELIVERY]\n\n${queueText}`,
