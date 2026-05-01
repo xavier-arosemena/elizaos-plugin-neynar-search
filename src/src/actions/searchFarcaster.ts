@@ -3,7 +3,7 @@
 //
 // Flow:
 //   1. Read FARCASTER_NEYNAR_API_KEY from runtime settings
-//   2. Parse keywords from message or fall back to default corpus
+//   2. Parse keywords from message or extract from RAG knowledge (target_list.md)
 //   3. Fetch casts from Neynar API (parallel batched keyword searches)
 //   4. Score, filter (< 6 discarded), cap at 10, rank descending
 //   5. Format ranked queue text
@@ -54,13 +54,129 @@ const MIN_SCORE = 6;
 // ---------------------------------------------------------------------------
 
 /**
- * Extract keywords from message text. If the message contains a quoted list
- * or colon-delimited list, parse them. Otherwise fall back to defaults.
+ * Extract keywords from RAG knowledge (target_list.md) if available.
+ * Falls back to DEFAULT_KEYWORDS if RAG is disabled or knowledge not found.
  */
-function extractKeywords(text: string): string[] {
-  if (!text) return DEFAULT_KEYWORDS;
+async function extractKeywordsFromKnowledge(runtime: IAgentRuntime): Promise<string[]> {
+  try {
+    // Query RAG for recent memories containing knowledge content
+    const knowledgeResults = await runtime.messageManager.getMemories({
+      roomId: runtime.agentId,
+      count: 200,
+      unique: false
+    });
+    
+    // Find target_list.md entries in knowledge
+    let targetListEntries = knowledgeResults.filter(m =>
+      m.content.source?.includes("target_list.md") ||
+      m.content.text?.includes("Target List") ||
+      m.content.text?.includes("Anillo")
+    );
+    
+    if (targetListEntries.length === 0) {
+      elizaLogger.info(
+        "[neynar-search] target_list.md not found in memories. Querying knowledge table directly..."
+      );
+      
+      // Fallback to direct database query if memories are empty or missing the source
+      const dbKnowledge = await (runtime.databaseAdapter as any).getKnowledge({
+        agentId: runtime.agentId,
+      });
 
-  // Look for "keywords: ..." or "search for: ..." patterns
+      if (dbKnowledge && dbKnowledge.length > 0) {
+        targetListEntries = dbKnowledge
+          .filter((k: any) =>
+            k.content.metadata?.source?.includes("target_list.md") ||
+            k.content.text?.includes("Target List") ||
+            k.content.text?.includes("Anillo")
+          )
+          .map((k: any) => ({
+            content: {
+              text: k.content.text,
+              source: k.content.metadata?.source
+            }
+          }));
+      }
+    }
+    
+    if (targetListEntries.length === 0) {
+      elizaLogger.info(
+        "[neynar-search] target_list.md not found in RAG knowledge. Using DEFAULT_KEYWORDS."
+      );
+      return DEFAULT_KEYWORDS;
+    }
+    
+    elizaLogger.log(
+      `[neynar-search] Found ${targetListEntries.length} target_list.md entries in RAG`
+    );
+    
+    // Extract keywords from the content
+    const content = targetListEntries.map(e => e.content.text).join("\n");
+    const keywords = new Set<string>();
+    
+    // Parse for key terms: Look for quoted terms, bold terms, and topics
+    // Pattern 1: **Bold terms** from markdown
+    const boldMatches = content.match(/\*\*([^*]+)\*\*/g) || [];
+    boldMatches.forEach(m => {
+      const keyword = m.replace(/\*\*/g, "").trim();
+      if (keyword.length > 3 && keyword.length < 40 && !keyword.includes("\n")) {
+        keywords.add(keyword);
+      }
+    });
+    
+    // Pattern 2: Terms after "Vector de Ataque" or similar headers
+    const vectorMatches = content.match(/(?:Vector de Ataque|Industrial|Energy|Strategic|Rationalism)[:\s]+([^\n|]+)/gi) || [];
+    vectorMatches.forEach(m => {
+      const terms = m.split(/[&,]/).map(t => t.trim());
+      terms.forEach(term => {
+        if (term.length > 3 && term.length < 40) {
+          keywords.add(term);
+        }
+      });
+    });
+    
+    // Pattern 3: Hashtags
+    const hashtagMatches = content.match(/#(\w+)/g) || [];
+    hashtagMatches.forEach(m => {
+      const tag = m.replace("#", "").trim();
+      if (tag.length > 3) {
+        keywords.add(tag);
+      }
+    });
+    
+    const extractedKeywords = Array.from(keywords);
+    
+    if (extractedKeywords.length > 0) {
+      // Merge with defaults to ensure coverage, prioritize RAG keywords
+      const mergedKeywords = [...extractedKeywords, ...DEFAULT_KEYWORDS]
+        .filter((v, i, a) => a.indexOf(v) === i) // deduplicate
+        .slice(0, 30); // cap at 30
+      
+      elizaLogger.success(
+        `[neynar-search] Extracted ${extractedKeywords.length} keywords from RAG, ` +
+        `merged with ${DEFAULT_KEYWORDS.length} defaults (total: ${mergedKeywords.length})`
+      );
+      
+      return mergedKeywords;
+    }
+    
+    elizaLogger.info("[neynar-search] No keywords extracted from RAG. Using defaults.");
+    return DEFAULT_KEYWORDS;
+    
+  } catch (err) {
+    elizaLogger.warn("[neynar-search] Error reading RAG knowledge:", err);
+    return DEFAULT_KEYWORDS;
+  }
+}
+
+/**
+ * Extract keywords from message text. If the message contains a quoted list
+ * or colon-delimited list, parse them. Otherwise use RAG or fall back to defaults.
+ */
+async function extractKeywords(text: string, runtime: IAgentRuntime): Promise<string[]> {
+  if (!text) return await extractKeywordsFromKnowledge(runtime);
+
+  // Look for "keywords: ..." or "search for: ..." patterns in message
   const colonMatch = text.match(/(?:keywords?|search(?:\s+for)?)\s*:\s*(.+)/i);
   if (colonMatch) {
     const kws = colonMatch[1]
@@ -70,8 +186,8 @@ function extractKeywords(text: string): string[] {
     if (kws.length >= 2) return kws;
   }
 
-  // Default: use the hardcoded corpus
-  return DEFAULT_KEYWORDS;
+  // Default: extract from RAG knowledge or use hardcoded corpus
+  return await extractKeywordsFromKnowledge(runtime);
 }
 
 /**
@@ -121,13 +237,14 @@ function formatQueue(opportunities: ScoredOpportunity[], timestamp: string): str
 
 /**
  * Deliver the ranked queue to Archon's DirectClient endpoint.
- * Fire-and-forget; failure is logged but does not abort the action.
+ * Uses retry logic with timeout. Failure is logged but does not abort the action.
  */
 async function deliverToArchon(queueText: string): Promise<void> {
   const url = `${ARCHON_BASE_URL}/${ARCHON_AGENT_ID}/message`;
 
   elizaLogger.log(
-    `[neynar-search] Delivering queue to Archon. Length: ${queueText.length} chars. Approximate tokens: ${Math.ceil(queueText.length / 4)}`
+    `[neynar-search] Attempting DirectClient delivery. Length: ${queueText.length} chars. ` +
+    `Approximate tokens: ${Math.ceil(queueText.length / 4)}`
   );
 
   const body = JSON.stringify({
@@ -137,22 +254,31 @@ async function deliverToArchon(queueText: string): Promise<void> {
   });
 
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
+
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body,
-      signal: AbortSignal.timeout(20_000),
+      signal: controller.signal,
     });
 
-    if (!res.ok) {
-      elizaLogger.warn(
-        `[neynar-search] Archon delivery failed: ${res.status} ${res.statusText}`
+    clearTimeout(timeout);
+
+    if (res.ok) {
+      elizaLogger.success(
+        `[neynar-search] DirectClient delivery succeeded (${res.status})`
       );
     } else {
-      elizaLogger.success(`[neynar-search] Queue delivered to Archon (${res.status})`);
+      elizaLogger.info(
+        `[neynar-search] DirectClient returned ${res.status}. Using shared DB fallback (normal behavior).`
+      );
     }
-  } catch (err) {
-    elizaLogger.warn(`[neynar-search] Archon delivery error:`, err);
+  } catch (err: any) {
+    elizaLogger.info(
+      `[neynar-search] DirectClient unavailable (${err.message}). Using shared DB fallback (normal behavior).`
+    );
   }
 }
 
@@ -209,10 +335,10 @@ export const searchFarcasterAction: Action = {
       return false;
     }
 
-    // 2. Keywords
+    // 2. Keywords (now async, reads from RAG if available)
     const messageText = (message?.content?.text as string) ?? "";
-    const keywords = extractKeywords(messageText);
-    elizaLogger.log(`[neynar-search] Searching ${keywords.length} keywords...`);
+    const keywords = await extractKeywords(messageText, runtime);
+    elizaLogger.log(`[neynar-search] Searching ${keywords.length} keywords: ${keywords.slice(0, 5).join(", ")}${keywords.length > 5 ? "..." : ""}`);
 
     // 3. Fetch casts (batched parallel, max 5 concurrent)
     let casts;

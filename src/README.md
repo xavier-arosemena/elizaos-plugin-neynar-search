@@ -10,10 +10,11 @@ No signer. No posting. No Farcaster client dependency. Pure signal detection.
 
 Registers a `SEARCH_FARCASTER` action that:
 
-1. Searches Farcaster casts matching a keyword corpus via `GET /v2/farcaster/cast/search`
-2. Scores each cast on three axes (author reach · engagement velocity · topical alignment) → **1–10**
-3. Discards anything below **6/10**, caps queue at **10 opportunities**
-4. Delivers the ranked queue (post URL, handle, engagement counts, score, suggested reply angle) to a target agent's DirectClient endpoint
+1. **Dynamically extracts keywords** from the agent's RAG knowledge (prioritizing `target_list.md` content from the `knowledge` table) or parses them from the triggering message.
+2. **Searches Farcaster casts** matching the keyword corpus via `GET /v2/farcaster/cast/search`.
+3. **Scores each cast** on three axes (author reach · engagement velocity · topical alignment) → **1–10**
+4. **Discards anything below 6/10**, caps queue at **10 opportunities**
+5. **Delivers the ranked queue** (post URL, handle, engagement counts, score, suggested reply angle) to a target agent's DirectClient endpoint.
 
 Designed for a **Scout agent** that feeds engagement opportunities to a publishing agent (e.g. Archon Europae) without ever touching the social graph itself.
 
