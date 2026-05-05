@@ -13,8 +13,9 @@ Registers a `SEARCH_FARCASTER` action that:
 1. **Dynamically extracts keywords** from the agent's RAG knowledge (prioritizing `target_list.md` content from the `knowledge` table) or parses them from the triggering message.
 2. **Searches Farcaster casts** matching the keyword corpus via `GET /v2/farcaster/cast/search`.
 3. **Scores each cast** on three axes (author reach · engagement velocity · topical alignment) → **1–10**
-4. **Discards anything below 6/10**, caps queue at **10 opportunities**
-5. **Delivers the ranked queue** (post URL, handle, engagement counts, score, suggested reply angle) to a target agent's DirectClient endpoint.
+4. **Filters to scores ≥ 6/10**, caps queue at **5 opportunities** (configurable via `MAX_RESULTS`)
+5. **Fallback**: if no opportunities meet the 6/10 threshold, returns the **top 5 highest-scoring** casts tagged as `[BELOW THRESHOLD]`
+6. **Delivers the ranked queue** (post URL, handle, engagement counts, score, suggested reply angle) to a target agent's DirectClient endpoint.
 
 Designed for a **Scout agent** that feeds engagement opportunities to a publishing agent (e.g. Archon Europae) without ever touching the social graph itself.
 
@@ -74,7 +75,7 @@ Or with a custom keyword list:
 Search Farcaster keywords: EU energy, European sovereignty, Austrian economics
 ```
 
-The action will return a structured queue:
+The action will return a structured queue. When opportunities meet the threshold:
 
 ```
 [SCOUT CYCLE 2024-01-15T10:00:00Z] — 3 opportunity(ies) queued
@@ -89,6 +90,23 @@ The action will return a structured queue:
 ...
 
 Queue delivered to Archon. 3 item(s). Cycle complete.
+```
+
+When no opportunities meet the 6/10 threshold, a fallback queue is returned with the top 5 highest-scoring casts:
+
+```
+[SCOUT CYCLE 2024-01-15T10:00:00Z] — FALLBACK: 5 lowest-scoring opportunities (none above 6/10 threshold)
+
+1. SCORE 4.5/10 [BELOW THRESHOLD] — @username
+   URL: https://warpcast.com/username/0x...
+   Reach: 1,200 followers
+   Engagement: 12L / 3RC / 1R (16 total)
+   Keywords: EU energy
+   Angle: Reply to @username on "EU energy" with a sourced data point to qualify the thread (16 interactions, score 4.5/10).
+
+...
+
+Fallback queue delivered to Archon. 5 item(s) (all below 6/10 threshold). Cycle complete.
 ```
 
 ---
@@ -129,7 +147,12 @@ Count of distinct keywords from the active corpus found in the cast text:
 | 3+             | 10.0  |
 
 **Final score** = `mean(reach, velocity, alignment)` rounded to 1 decimal, clamped [1, 10].
-Casts scoring **< 6** are discarded. Queue is **capped at 10**.
+
+### Filtering
+
+- Casts scoring **≥ 6** are included in the normal queue, capped at `MAX_RESULTS` (default: 5).
+- If **no casts** score ≥ 6, the **top 5 highest-scoring** casts are returned as a **fallback queue**, each tagged with `[BELOW THRESHOLD]`.
+- This ensures Archon always receives actionable intelligence, even during low-signal periods.
 
 ---
 

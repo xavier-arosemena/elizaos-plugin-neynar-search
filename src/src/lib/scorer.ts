@@ -168,3 +168,40 @@ export function scoreAndRank(
     .sort((a, b) => b.score - a.score)
     .slice(0, maxResults);
 }
+
+/**
+ * Score, filter, and rank with fallback behavior.
+ *
+ * First tries the standard logic (filter ≥ minScore, sort, cap at maxResults).
+ * If no opportunities meet the threshold, falls back to returning the top
+ * `fallbackCount` highest-scoring casts regardless of score, tagged as fallback.
+ *
+ * Returns an object with:
+ *   - opportunities: the ranked list
+ *   - isFallback: true if no opportunities met the threshold
+ */
+export function scoreAndRankWithFallback(
+  casts: NeynarCast[],
+  keywords: string[],
+  minScore = 6,
+  maxResults = 10,
+  fallbackCount = 5
+): { opportunities: ScoredOpportunity[]; isFallback: boolean } {
+  const scored = casts.map((c) => scoreCast(c, keywords));
+
+  const aboveThreshold = scored
+    .filter((o) => o.score >= minScore)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxResults);
+
+  if (aboveThreshold.length > 0) {
+    return { opportunities: aboveThreshold, isFallback: false };
+  }
+
+  // Fallback: take top N highest-scoring regardless of threshold
+  const fallback = scored
+    .sort((a, b) => b.score - a.score)
+    .slice(0, fallbackCount);
+
+  return { opportunities: fallback, isFallback: true };
+}

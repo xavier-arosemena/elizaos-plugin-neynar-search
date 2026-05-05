@@ -14,7 +14,7 @@
 import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from "@elizaos/core";
 import { elizaLogger } from "@elizaos/core";
 import { searchAllKeywords } from "../lib/neynarClient.js";
-import { scoreAndRank } from "../lib/scorer.js";
+import { scoreAndRankWithFallback } from "../lib/scorer.js";
 import type { ScoredOpportunity } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -193,9 +193,51 @@ async function extractKeywords(text: string, runtime: IAgentRuntime): Promise<st
 /**
  * Format the scored opportunity queue as structured text for Archon.
  */
-function formatQueue(opportunities: ScoredOpportunity[], timestamp: string): string {
+function formatQueue(
+  opportunities: ScoredOpportunity[],
+  timestamp: string,
+  isFallback: boolean = false
+): string {
   if (opportunities.length === 0) {
-    return `[SCOUT CYCLE ${timestamp}]\nNo opportunities above threshold found this cycle. 0/10.`;
+    return `[SCOUT CYCLE ${timestamp}]\nNo opportunities found this cycle. 0/10.`;
+  }
+
+  if (isFallback) {
+    const lines: string[] = [
+      `[SCOUT CYCLE ${timestamp}] — FALLBACK: ${opportunities.length} lowest-scoring opportunities (none above ${MIN_SCORE}/10 threshold)`,
+      "",
+    ];
+
+    for (let i = 0; i < opportunities.length; i++) {
+      const op = opportunities[i];
+      const totalEng =
+        (op.reactions?.likes_count ?? 0) +
+        (op.reactions?.recasts_count ?? 0) +
+        (op.replies?.count ?? 0);
+
+      // Truncate suggestedAngle to 150 chars max to avoid exceeding embedding context
+      const truncatedAngle = op.suggestedAngle.length > 150
+        ? op.suggestedAngle.slice(0, 147) + "..."
+        : op.suggestedAngle;
+
+      lines.push(`${i + 1}. SCORE ${op.score}/10 [BELOW THRESHOLD] — @${op.author.username}`);
+      lines.push(`   URL: ${op.castUrl}`);
+      lines.push(
+        `   Reach: ${op.author.follower_count.toLocaleString()} followers${op.author.power_badge ? " [⚡ power badge]" : ""}`
+      );
+      lines.push(
+        `   Engagement: ${op.reactions.likes_count}L / ${op.reactions.recasts_count}RC / ${op.replies.count}R (${totalEng} total)`
+      );
+      lines.push(`   Keywords: ${op.matchedKeywords.join(", ") || "n/a"}`);
+      lines.push(`   Angle: ${truncatedAngle}`);
+      lines.push("");
+    }
+
+    lines.push(
+      `Fallback queue delivered to Archon. ${opportunities.length} item(s) (all below ${MIN_SCORE}/10 threshold). Cycle complete.`
+    );
+
+    return lines.join("\n");
   }
 
   const lines: string[] = [
@@ -353,15 +395,17 @@ export const searchFarcasterAction: Action = {
       `[neynar-search] Fetched ${casts.length} unique casts across ${keywords.length} keywords`
     );
 
-    // 4. Score, filter, rank
-    const opportunities = scoreAndRank(casts, keywords, MIN_SCORE, MAX_RESULTS);
+    // 4. Score, filter, rank (with fallback to top 5 if none above threshold)
+    const { opportunities, isFallback } = scoreAndRankWithFallback(
+      casts, keywords, MIN_SCORE, MAX_RESULTS, 5
+    );
 
     elizaLogger.log(
-      `[neynar-search] ${opportunities.length} opportunities above threshold (min ${MIN_SCORE}/10)`
+      `[neynar-search] ${opportunities.length} opportunities ${isFallback ? "(fallback — below threshold)" : "above threshold (min " + MIN_SCORE + "/10)"}`
     );
 
     // 5. Format queue
-    const queueText = formatQueue(opportunities, timestamp);
+    const queueText = formatQueue(opportunities, timestamp, isFallback);
 
     // 6. Deliver to Archon (non-blocking)
     deliverToArchon(queueText).catch(() => {
