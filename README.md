@@ -251,17 +251,20 @@ RUN pnpm install --no-frozen-lockfile
 ```
 elizaos-plugin-neynar-search/
 ├── src/
+│   ├── index.ts                    # Plugin entry point
 │   ├── types.ts                    # NeynarCast, ScoredOpportunity interfaces
-│   ├── index.ts                    # Plugin export
-│   ├── lib/
-│   │   ├── neynarClient.ts         # Raw fetch HTTP wrappers
-│   │   └── scorer.ts               # Three-axis scoring engine
-│   └── actions/
-│       └── searchFarcaster.ts      # SEARCH_FARCASTER action
+│   ├── actions/
+│   │   └── searchFarcaster.ts      # SEARCH_FARCASTER action
+│   └── lib/
+│       ├── neynarClient.ts         # Raw fetch HTTP wrappers
+│       ├── scorer.ts               # Three-axis scoring engine
+│       ├── cache.ts                # Search result cache with TTL
+│       └── watchlist.ts            # Auto-discovery author watchlist
 ├── package.json
 ├── tsconfig.json
 ├── LICENSE                         # MIT
-└── README.md
+├── README.md
+└── .gitignore
 ```
 
 ---

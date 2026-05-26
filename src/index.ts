@@ -23,4 +23,5 @@ export default neynarSearchPlugin;
 
 // Named re-exports for convenience
 export { searchFarcasterAction } from "./actions/searchFarcaster.js";
+export { lookupCast, searchCasts, getUserCasts, searchAllKeywords } from "./lib/neynarClient.js";
 export type { NeynarCast, ScoredOpportunity, PluginConfig } from "./types.js";
