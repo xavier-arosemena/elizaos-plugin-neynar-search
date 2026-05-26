@@ -15,9 +15,10 @@ import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from "@eli
 import { elizaLogger } from "@elizaos/core";
 import * as fs from "fs";
 import * as path from "path";
-import { searchAllKeywords, getUserCasts, lookupUserByHandle, getNotifications } from "../lib/neynarClient.js";
+import { searchAllKeywords, getUserCasts, getNotifications } from "../lib/neynarClient.js";
 import { scoreAndRankWithFallback } from "../lib/scorer.js";
 import { loadCachedResults, saveCachedResults } from "../lib/cache.js";
+import { updateWatchlist } from "../lib/watchlist.js";
 import type { ScoredOpportunity, ScoutCycleState, NeynarCast, MonitoredProfile } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -30,7 +31,16 @@ const ARCHON_BASE_URL = process.env.ARCHON_BASE_URL ?? "http://archon_euro_conta
 /** Archon's Farcaster FID for inbound engagement detection (Tier 3) */
 const ARCHON_FARCASTER_FID = Number(process.env.ARCHON_FARCASTER_FID) || 3315139;
 
-/** Default keyword corpus derived from target_list.md and CONSTITUTION.md */
+/**
+ * Path to the generated Farcaster target list JSON (FIDs are pre-confirmed).
+ * Mounted at /app/characters via docker-compose volumes.
+ */
+const TARGET_LIST_JSON_PATH = path.resolve(
+  process.cwd(),
+  "characters/archon_europae/farcaster_target_list.json"
+);
+
+/** Default keyword corpus derived from farcaster_target_list.md and CONSTITUTION.md */
 const DEFAULT_KEYWORDS = [
   "EU energy",
   "European sovereignty",
@@ -521,17 +531,18 @@ async function runTier3(apiKey: string): Promise<NeynarCast[]> {
 }
 
 /**
- * Resolve monitored Farcaster handles from RAG knowledge (target_list.md)
- * into MonitoredProfile[] with FIDs via Neynar API.
- * 
- * Falls back to hardcoded known handles if RAG is unavailable.
+ * Resolve monitored Farcaster profiles from the generated target list JSON
+ * into MonitoredProfile[] with known FIDs (no API calls needed).
+ *
+ * Uses static FIDs from farcaster_target_list.json + auto-discovered FIDs
+ * from the watchlist (high-scoring recurring authors promoted to Tier 2).
  * Cache is in-memory for current Scout process lifespan.
  */
 let _resolvedProfilesCache: MonitoredProfile[] | null = null;
 
 async function resolveMonitoredProfiles(
-  apiKey: string,
-  runtime: IAgentRuntime
+  _apiKey: string,
+  _runtime: IAgentRuntime
 ): Promise<MonitoredProfile[]> {
   // Return cached profiles if already resolved this process lifetime
   if (_resolvedProfilesCache && _resolvedProfilesCache.length > 0) {
@@ -541,97 +552,88 @@ async function resolveMonitoredProfiles(
     return _resolvedProfilesCache;
   }
 
-  // Extract @handles from target_list.md via RAG knowledge
-  const handles = new Set<string>();
+  // -----------------------------------------------------------------------
+  // 1. Static FIDs from farcaster_target_list.json
+  // -----------------------------------------------------------------------
+  const staticProfiles: MonitoredProfile[] = [];
   try {
-    const dbKnowledge = await (runtime.databaseAdapter as any).getKnowledge({
-      agentId: runtime.agentId,
-    });
+    const raw = fs.readFileSync(TARGET_LIST_JSON_PATH, "utf-8");
+    const data = JSON.parse(raw);
 
-    if (dbKnowledge && dbKnowledge.length > 0) {
-      const targetListEntries = dbKnowledge.filter((k: any) =>
-        k.content?.metadata?.source?.includes("target_list.md") ||
-        k.content?.text?.includes("Target List") ||
-        k.content?.text?.includes("Anillo")
-      );
+    if (data && Array.isArray(data.monitoredFids)) {
+      for (const entry of data.monitoredFids) {
+        staticProfiles.push({
+          fid: entry.fid,
+          handle: entry.handle,
+          followerCount: 0, // not stored in JSON; Tier 2 only uses this for display
+          vector: entry.vector ?? undefined,
+        });
+      }
+    }
+  } catch (err) {
+    elizaLogger.warn(
+      `[neynar-search] resolveMonitoredProfiles: Cannot read ${TARGET_LIST_JSON_PATH} — ${String(err)}`
+    );
+  }
 
-      for (const entry of targetListEntries) {
-        const text: string = entry.content?.text || "";
-        // Match @handles in the format "Name (@handle)" or just "@handle"
-        const atMatches = text.match(/@(\w+)/g) || [];
-        for (const m of atMatches) {
-          handles.add(m.replace("@", "").toLowerCase().trim());
+  elizaLogger.info(
+    `[neynar-search] resolveMonitoredProfiles: ${staticProfiles.length} static FIDs from target list`
+  );
+
+  // -----------------------------------------------------------------------
+  // 2. Auto-discovered FIDs from watchlist (isMonitored === true)
+  // -----------------------------------------------------------------------
+  const autoProfiles: MonitoredProfile[] = [];
+  const WATCHLIST_PATH = "/app/.neynar-state/watchlist.json";
+  try {
+    if (fs.existsSync(WATCHLIST_PATH)) {
+      const raw = fs.readFileSync(WATCHLIST_PATH, "utf-8");
+      const watchlist: any[] = JSON.parse(raw);
+
+      for (const entry of watchlist) {
+        if (entry.isMonitored === true && entry.fid) {
+          autoProfiles.push({
+            fid: entry.fid,
+            handle: entry.handle ?? `fid_${entry.fid}`,
+            followerCount: 0,
+            vector: undefined,
+          });
         }
       }
     }
   } catch (err) {
-    elizaLogger.warn("[neynar-search] resolveMonitoredProfiles: RAG error — " + String(err));
+    elizaLogger.warn(
+      `[neynar-search] resolveMonitoredProfiles: Watchlist read error — ${String(err)}`
+    );
   }
 
-  // Fallback handles if RAG had nothing
-  if (handles.size === 0) {
-    elizaLogger.info("[neynar-search] resolveMonitoredProfiles: No @handles found in RAG, using fallback handles");
-    for (const h of ["jordanpeterson", "balaji", "vitalikbuterin", "naval"]) {
-      handles.add(h);
-    }
+  if (autoProfiles.length > 0) {
+    elizaLogger.info(
+      `[neynar-search] resolveMonitoredProfiles: ${autoProfiles.length} auto-discovered FIDs from watchlist`
+    );
   }
 
-  elizaLogger.info(
-    `[neynar-search] resolveMonitoredProfiles: Resolving ${handles.size} handles via Neynar API`
-  );
+  // -----------------------------------------------------------------------
+  // 3. Merge static + auto-discovered (static takes priority for dedup)
+  // -----------------------------------------------------------------------
+  const seenFids = new Set<number>();
+  const merged: MonitoredProfile[] = [];
 
-  // Resolve each handle to an FID via Neynar API
-  // If 3 consecutive lookups fail, assume plan limitation (402) and skip remaining
-  const profiles: MonitoredProfile[] = [];
-  let consecutiveFailures = 0;
-  const MAX_FAILURES_BEFORE_SKIP = 3;
-  let profileAttempts = 0;
-
-  for (const handle of handles) {
-    if (consecutiveFailures >= MAX_FAILURES_BEFORE_SKIP) {
-      elizaLogger.info(
-        `[NeynarDebug] resolveMonitoredProfiles: ${consecutiveFailures} consecutive failures — ` +
-        `skipping remaining ${handles.size - profileAttempts} handles (plan limitation)`
-      );
-      break;
+  for (const p of [...staticProfiles, ...autoProfiles]) {
+    if (!seenFids.has(p.fid)) {
+      seenFids.add(p.fid);
+      merged.push(p);
     }
-
-    profileAttempts++;
-
-    try {
-      const result = await lookupUserByHandle(apiKey, handle);
-      if (result) {
-        profiles.push({
-          handle: result.username,
-          fid: result.fid,
-          followerCount: result.followerCount,
-        });
-        consecutiveFailures = 0;
-      } else {
-        consecutiveFailures++;
-        elizaLogger.warn(
-          `[neynar-search] resolveMonitoredProfiles: Could not resolve @${handle} — skipping`
-        );
-      }
-    } catch (err) {
-      consecutiveFailures++;
-      elizaLogger.warn(
-        `[neynar-search] resolveMonitoredProfiles: Error resolving @${handle}: ${String(err)}`
-      );
-    }
-
-    // Small delay between API calls to be polite
-    await new Promise(r => setTimeout(r, 200));
   }
 
   // Cache for this process lifetime
-  _resolvedProfilesCache = profiles;
+  _resolvedProfilesCache = merged;
 
   elizaLogger.info(
-    `[neynar-search] resolveMonitoredProfiles: ${profiles.length}/${handles.size} handles resolved successfully`
+    `[neynar-search] resolveMonitoredProfiles: ${merged.length} total profiles (${staticProfiles.length} static + ${autoProfiles.length} auto)`
   );
 
-  return profiles;
+  return merged;
 }
 
 /**
@@ -745,6 +747,9 @@ export const searchFarcasterAction: Action = {
     elizaLogger.log(
       `[neynar-search] ${opportunities.length} opportunities ${isFallback ? "(fallback)" : "above threshold"}`
     );
+
+    // 8b. Update watchlist with scored opportunities (non-blocking)
+    updateWatchlist(opportunities).catch(() => { /* logged inside */ });
 
     // 9. Format queue
     const queueText = formatQueue(opportunities, timestamp, isFallback);

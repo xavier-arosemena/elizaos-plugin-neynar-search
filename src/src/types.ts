@@ -91,12 +91,14 @@ export interface ScoutCycleState {
 
 /** Resolved profile with FID for Tier 2 profile monitoring */
 export interface MonitoredProfile {
-  /** Farcaster handle without @, e.g. "jordanpeterson" */
+  /** Farcaster handle without @, e.g. "tldr" */
   handle: string;
-  /** Resolved Farcaster ID (FID) from Neynar API */
+  /** Resolved Farcaster ID (FID) from target_list.json */
   fid: number;
   /** Follower count at resolution time */
   followerCount: number;
+  /** Strategic vector: "Industrial & Energy" | "Strategic Autonomy" | "Rationalism & Finance" */
+  vector?: string;
 }
 
 /** A single notification from Neynar's notifications endpoint */
