@@ -19,28 +19,12 @@ import { searchAllKeywords, getUserCasts, getNotifications } from "../lib/neynar
 import { scoreAndRankWithFallback } from "../lib/scorer.js";
 import { loadCachedResults, saveCachedResults } from "../lib/cache.js";
 import { updateWatchlist } from "../lib/watchlist.js";
-import type { ScoredOpportunity, ScoutCycleState, NeynarCast, MonitoredProfile } from "../types.js";
+import type { ScoredOpportunity, ScoutCycleState, NeynarCast, MonitoredProfile, PluginConfig } from "../types.js";
 
 // ---------------------------------------------------------------------------
-// Constants
+// Defaults (used as fallback when runtime settings are not provided)
 // ---------------------------------------------------------------------------
 
-const ARCHON_AGENT_ID = process.env.ARCHON_AGENT_ID ?? "187939ae-c36e-08ef-836f-131b1b658c9a";
-const ARCHON_BASE_URL = process.env.ARCHON_BASE_URL ?? "http://archon_euro_container:3000";
-
-/** Archon's Farcaster FID for inbound engagement detection (Tier 3) */
-const ARCHON_FARCASTER_FID = Number(process.env.ARCHON_FARCASTER_FID) || 3315139;
-
-/**
- * Path to the generated Farcaster target list JSON (FIDs are pre-confirmed).
- * Mounted at /app/characters via docker-compose volumes.
- */
-const TARGET_LIST_JSON_PATH = path.resolve(
-  process.cwd(),
-  "characters/archon_europae/farcaster_target_list.json"
-);
-
-/** Default keyword corpus derived from farcaster_target_list.md and CONSTITUTION.md */
 const DEFAULT_KEYWORDS = [
   "EU energy",
   "European sovereignty",
@@ -62,8 +46,35 @@ const DEFAULT_KEYWORDS = [
   "energy prices Europe",
 ];
 
-const MAX_RESULTS = 5;
-const MIN_SCORE = 6;
+const DEFAULT_MAX_RESULTS = 5;
+const DEFAULT_MIN_SCORE = 6;
+
+// ---------------------------------------------------------------------------
+// Config builder — reads all settings from runtime / environment
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a PluginConfig from the agent runtime.
+ * Every value can be overridden via runtime settings (character.json secrets / env vars).
+ * This is the single place where configuration defaults are defined.
+ */
+export function createPluginConfig(runtime: IAgentRuntime): PluginConfig {
+  return {
+    apiKey: runtime.getSetting("FARCASTER_NEYNAR_API_KEY") || "",
+    archonUrl:
+      runtime.getSetting("ARCHON_BASE_URL") ?? "http://archon_euro_container:3000",
+    archonAgentId:
+      runtime.getSetting("ARCHON_AGENT_ID") ?? "187939ae-c36e-08ef-836f-131b1b658c9a",
+    archonFarcasterFid:
+      Number(runtime.getSetting("ARCHON_FARCASTER_FID")) || 3315139,
+    targetListJsonPath:
+      runtime.getSetting("TARGET_LIST_JSON_PATH") ??
+      path.resolve(process.cwd(), "characters/archon_europae/farcaster_target_list.json"),
+    defaultKeywords: DEFAULT_KEYWORDS,
+    maxResults: Number(runtime.getSetting("SCOUT_MAX_RESULTS")) || DEFAULT_MAX_RESULTS,
+    minScore: Number(runtime.getSetting("SCOUT_MIN_SCORE")) || DEFAULT_MIN_SCORE,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -217,6 +228,7 @@ async function extractKeywords(text: string, runtime: IAgentRuntime): Promise<st
 function formatQueue(
   opportunities: ScoredOpportunity[],
   timestamp: string,
+  minScore: number,
   isFallback: boolean = false
 ): string {
   if (opportunities.length === 0) {
@@ -225,7 +237,7 @@ function formatQueue(
 
   if (isFallback) {
     const lines: string[] = [
-      `[SCOUT CYCLE ${timestamp}] — FALLBACK: ${opportunities.length} lowest-scoring opportunities (none above ${MIN_SCORE}/10 threshold)`,
+      `[SCOUT CYCLE ${timestamp}] — FALLBACK: ${opportunities.length} lowest-scoring opportunities (none above ${minScore}/10 threshold)`,
       "",
     ];
 
@@ -255,7 +267,7 @@ function formatQueue(
     }
 
     lines.push(
-      `Fallback queue delivered to Archon. ${opportunities.length} item(s) (all below ${MIN_SCORE}/10 threshold). Cycle complete.`
+      `Fallback queue delivered to Archon. ${opportunities.length} item(s) (all below ${minScore}/10 threshold). Cycle complete.`
     );
 
     return lines.join("\n");
@@ -306,8 +318,8 @@ function formatQueue(
  * Uses retry logic with timeout. Failure is logged but does not abort the action.
  * Includes structured logging for delivery tracking.
  */
-async function deliverToArchon(queueText: string): Promise<void> {
-  const url = `${ARCHON_BASE_URL}/${ARCHON_AGENT_ID}/ingest`;
+async function deliverToArchon(queueText: string, config: PluginConfig): Promise<void> {
+  const url = `${config.archonUrl}/${config.archonAgentId}/ingest`;
 
   elizaLogger.info(
     `[NeynarDebug] Attempting DirectClient delivery. Length: ${queueText.length} chars. ` +
@@ -487,8 +499,8 @@ async function runTier2(
  * GET /v2/farcaster/notifications?fid={ARCHON_FARCASTER_FID}&limit=25
  * ~148 credits per call, 1 call per cycle.
  */
-async function runTier3(apiKey: string): Promise<NeynarCast[]> {
-  const fid = ARCHON_FARCASTER_FID;
+async function runTier3(apiKey: string, config: PluginConfig): Promise<NeynarCast[]> {
+  const fid = config.archonFarcasterFid;
   
   elizaLogger.info(
     `[NeynarDebug] Tier 3: Checking inbound engagement for FID ${fid}...`
@@ -542,7 +554,8 @@ let _resolvedProfilesCache: MonitoredProfile[] | null = null;
 
 async function resolveMonitoredProfiles(
   _apiKey: string,
-  _runtime: IAgentRuntime
+  _runtime: IAgentRuntime,
+  config: PluginConfig
 ): Promise<MonitoredProfile[]> {
   // Return cached profiles if already resolved this process lifetime
   if (_resolvedProfilesCache && _resolvedProfilesCache.length > 0) {
@@ -557,7 +570,7 @@ async function resolveMonitoredProfiles(
   // -----------------------------------------------------------------------
   const staticProfiles: MonitoredProfile[] = [];
   try {
-    const raw = fs.readFileSync(TARGET_LIST_JSON_PATH, "utf-8");
+    const raw = fs.readFileSync(config.targetListJsonPath, "utf-8");
     const data = JSON.parse(raw);
 
     if (data && Array.isArray(data.monitoredFids)) {
@@ -572,7 +585,7 @@ async function resolveMonitoredProfiles(
     }
   } catch (err) {
     elizaLogger.warn(
-      `[neynar-search] resolveMonitoredProfiles: Cannot read ${TARGET_LIST_JSON_PATH} — ${String(err)}`
+      `[neynar-search] resolveMonitoredProfiles: Cannot read ${config.targetListJsonPath} — ${String(err)}`
     );
   }
 
@@ -699,8 +712,11 @@ export const searchFarcasterAction: Action = {
 
     elizaLogger.log(`[neynar-search] Starting THREE-TIER discovery cycle at ${timestamp}`);
 
-    // 1. API key
-    const apiKey = runtime.getSetting("FARCASTER_NEYNAR_API_KEY");
+    // 1. Build config from runtime settings
+    const config = createPluginConfig(runtime);
+
+    // 2. API key (already validated by validate(), but double-check)
+    const apiKey = config.apiKey;
     if (!apiKey) {
       const errText = "[SCOUT] ERROR: FARCASTER_NEYNAR_API_KEY not configured. Cycle aborted.";
       elizaLogger.error("[neynar-search] " + errText);
@@ -708,56 +724,56 @@ export const searchFarcasterAction: Action = {
       return false;
     }
 
-    // 2. Cycle counter (increment each run)
+    // 3. Cycle counter (increment each run)
     const cycleNumber = getNextCycleNumber();
     elizaLogger.log(`[neynar-search] Cycle #${cycleNumber} — determining which tiers to run`);
 
-    // 3. Extract keywords
+    // 4. Extract keywords
     const messageText = (message?.content?.text as string) ?? "";
     const keywords = await extractKeywords(messageText, runtime);
 
-    // 4. Tier 1: Topic Discovery — every cycle, cached
+    // 5. Tier 1: Topic Discovery — every cycle, cached
     const tier1Casts = await runTier1(apiKey, keywords, cycleNumber);
 
-    // 5. Tier 2: Profile Monitoring — every 2 cycles
+    // 6. Tier 2: Profile Monitoring — every 2 cycles
     let tier2Casts: NeynarCast[] = [];
     if (cycleNumber % 2 === 0) {
-      const monitoredProfiles = await resolveMonitoredProfiles(apiKey, runtime);
+      const monitoredProfiles = await resolveMonitoredProfiles(apiKey, runtime, config);
       tier2Casts = await runTier2(apiKey, monitoredProfiles);
     } else {
       elizaLogger.log("[neynar-search] Tier 2 (profile monitoring) skipped — odd cycle");
     }
 
-    // 6. Tier 3: Inbound Engagement — every cycle
-    const tier3Casts = await runTier3(apiKey);
+    // 7. Tier 3: Inbound Engagement — every cycle
+    const tier3Casts = await runTier3(apiKey, config);
     // Tier 3 uses notifications endpoint (~148 credits/call, 1 call/cycle)
 
-    // 7. Merge and deduplicate all tiers
+    // 8. Merge and deduplicate all tiers
     const allCasts = mergeAndDedupe([tier1Casts, tier2Casts, tier3Casts]);
     elizaLogger.log(
       `[neynar-search] Merged tiers: T1=${tier1Casts.length}, T2=${tier2Casts.length}, ` +
       `T3=${tier3Casts.length}, unique=${allCasts.length}`
     );
 
-    // 8. Score, filter, rank (existing logic from scorer.ts)
+    // 9. Score, filter, rank (existing logic from scorer.ts)
     const { opportunities, isFallback } = scoreAndRankWithFallback(
-      allCasts, keywords, MIN_SCORE, MAX_RESULTS, 5
+      allCasts, keywords, config.minScore, config.maxResults, 5
     );
 
     elizaLogger.log(
       `[neynar-search] ${opportunities.length} opportunities ${isFallback ? "(fallback)" : "above threshold"}`
     );
 
-    // 8b. Update watchlist with scored opportunities (non-blocking)
+    // 9b. Update watchlist with scored opportunities (non-blocking)
     updateWatchlist(opportunities).catch(() => { /* logged inside */ });
 
-    // 9. Format queue
-    const queueText = formatQueue(opportunities, timestamp, isFallback);
+    // 10. Format queue
+    const queueText = formatQueue(opportunities, timestamp, config.minScore, isFallback);
 
-    // 10. Deliver to Archon (non-blocking)
-    deliverToArchon(queueText).catch(() => { /* logged inside */ });
+    // 11. Deliver to Archon (non-blocking)
+    deliverToArchon(queueText, config).catch(() => { /* logged inside */ });
 
-    // 11. Return to Scout via callback
+    // 12. Return to Scout via callback
     callback({ text: queueText });
 
     return true;

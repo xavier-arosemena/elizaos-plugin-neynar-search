@@ -62,12 +62,22 @@ export interface ScoredOpportunity extends NeynarCast {
 
 /** Runtime configuration built inside the action handler */
 export interface PluginConfig {
+  /** Neynar API key (required) */
   apiKey: string;
-  archonUrl: string;          // e.g. http://archon_euro_container:3000
+  /** Base URL of the target agent's DirectClient, e.g. http://archon_euro_container:3000 */
+  archonUrl: string;
+  /** Agent ID of the target agent receiving the scout queue */
   archonAgentId: string;
-  keywords: string[];
-  maxResults: number;         // cap, default 10
-  minScore: number;           // discard below this, default 6
+  /** Farcaster ID (FID) of the target agent for inbound engagement detection (Tier 3) */
+  archonFarcasterFid: number;
+  /** Path to the generated target list JSON (Tier 2 profile monitoring) */
+  targetListJsonPath: string;
+  /** Default keyword corpus for Tier 1 topic discovery when RAG knowledge is unavailable */
+  defaultKeywords: string[];
+  /** Maximum number of results in the ranked queue (default: 5) */
+  maxResults: number;
+  /** Minimum score threshold; casts below this are discarded unless fallback triggers (default: 6) */
+  minScore: number;
 }
 
 /**

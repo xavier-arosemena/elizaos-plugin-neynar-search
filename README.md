@@ -35,7 +35,26 @@ pnpm add @elizaos/plugin-neynar-search
 
 ## Configuration
 
-Add to your agent's `character.json`:
+### Required
+
+| Setting | Description |
+|---------|-------------|
+| `FARCASTER_NEYNAR_API_KEY` | Neynar API key for all API calls. Get a free key at [neynar.com](https://neynar.com). |
+
+### Optional
+
+All optional settings have sensible defaults. Override any of them via environment variables or `character.json` > `settings.secrets`.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `ARCHON_BASE_URL` | `http://archon_euro_container:3000` | Base URL of the target agent's DirectClient |
+| `ARCHON_AGENT_ID` | `187939ae-c36e-08ef-836f-131b1b658c9a` | Agent ID receiving the scout queue |
+| `ARCHON_FARCASTER_FID` | `3315139` | FID of the target agent (for Tier 3 inbound engagement detection) |
+| `TARGET_LIST_JSON_PATH` | `{cwd}/characters/archon_europae/farcaster_target_list.json` | Path to the generated target list JSON (Tier 2 profile monitoring) |
+| `SCOUT_MAX_RESULTS` | `5` | Maximum number of opportunities in the ranked queue |
+| `SCOUT_MIN_SCORE` | `6` | Minimum score threshold; casts below this are discarded (unless fallback triggers) |
+
+### Example: `character.json`
 
 ```json
 {
@@ -43,7 +62,13 @@ Add to your agent's `character.json`:
   "clients": ["direct"],
   "settings": {
     "secrets": {
-      "FARCASTER_NEYNAR_API_KEY": "your-neynar-api-key"
+      "FARCASTER_NEYNAR_API_KEY": "your-neynar-api-key",
+      "ARCHON_BASE_URL": "http://my-agent:3000",
+      "ARCHON_AGENT_ID": "my-agent-id",
+      "ARCHON_FARCASTER_FID": "123456",
+      "TARGET_LIST_JSON_PATH": "/app/data/targets.json",
+      "SCOUT_MAX_RESULTS": "10",
+      "SCOUT_MIN_SCORE": "4"
     }
   }
 }
@@ -51,13 +76,13 @@ Add to your agent's `character.json`:
 
 > **Important:** Use only `"direct"` in the `clients` array. The `auto` client drives autonomous posting — a read-only discovery agent must not post anything. The `direct` client exposes the HTTP endpoint that `scout_cycle.sh` calls.
 
-Or set the API key via environment variable:
+Or set any setting via environment variable:
 
 ```bash
 FARCASTER_NEYNAR_API_KEY=your-neynar-api-key
+ARCHON_BASE_URL=http://my-agent:3000
+SCOUT_MAX_RESULTS=10
 ```
-
-Get a free Neynar API key at [neynar.com](https://neynar.com).
 
 ---
 
@@ -162,14 +187,14 @@ Count of distinct keywords from the active corpus found in the cast text:
 
 ---
 
-## Archon delivery
+## Delivery to target agent
 
-By default the plugin POSTs the queue to the lightweight `/ingest` endpoint (skips LLM inference — ~50ms response):
+The plugin POSTs the ranked queue to the target agent's DirectClient `/ingest` endpoint (skips LLM inference — ~50ms response):
 ```
-http://archon_euro_container:3000/{ARCHON_AGENT_ID}/ingest
+{ARCHON_BASE_URL}/{ARCHON_AGENT_ID}/ingest
 ```
 
-This is hardcoded for the `agents-ecosystem` multi-agent setup. To adapt for a different target, edit `ARCHON_BASE_URL` and `ARCHON_AGENT_ID` in [`src/actions/searchFarcaster.ts`](src/actions/searchFarcaster.ts).
+Configure the target via `ARCHON_BASE_URL` and `ARCHON_AGENT_ID` runtime settings (see [Configuration](#configuration)). No code changes needed.
 
 ---
 
@@ -206,22 +231,24 @@ This triggers the `SEARCH_FARCASTER` action inside the container and returns the
 
 ## Integration with ElizaOS engine
 
-### 1. `pnpm-workspace.yaml` (engine root)
-```yaml
-packages:
-  - 'plugins/*'
+### 1. Add the dependency
+
+```bash
+pnpm add @elizaos/plugin-neynar-search@github:xavier-arosemena/elizaos-plugin-neynar-search
 ```
 
-### 2. `package.json` (engine)
+Or add it manually to `package.json`:
+
 ```json
 {
   "dependencies": {
-    "@elizaos/plugin-neynar-search": "workspace:*"
+    "@elizaos/plugin-neynar-search": "github:xavier-arosemena/elizaos-plugin-neynar-search"
   }
 }
 ```
 
-### 3. `src/index.ts` (engine)
+### 2. `src/index.ts` (engine)
+
 ```typescript
 import { neynarSearchPlugin } from "@elizaos/plugin-neynar-search";
 
@@ -236,13 +263,51 @@ plugins: [
 ].filter(Boolean),
 ```
 
-### 4. `Dockerfile`
-```dockerfile
-COPY pnpm-workspace.yaml ./
-COPY plugins/ ./plugins/
-# then:
-RUN pnpm install --no-frozen-lockfile
+### 3. Run install
+
+```bash
+pnpm install
 ```
+
+The plugin is downloaded from the GitHub repository and installed like any other npm dependency. No workspace copy needed.
+
+---
+
+## Development workflow
+
+This plugin is developed in its own repository at `elizaos-plugin-neynar-search/` and consumed by the engine as a git dependency. For local development, use the **link-based workflow**:
+
+### Link-based development (recommended)
+
+```bash
+# 1. Temporarily switch to a local symlink
+cd /root/agents-ecosystem/engine
+# Edit package.json:
+#   "@elizaos/plugin-neynar-search": "link:/root/elizaos-plugin-neynar-search"
+pnpm install
+
+# 2. Edit files in /root/elizaos-plugin-neynar-search/ — changes reflect immediately
+
+# 3. When ready to publish, commit and push to GitHub
+cd /root/elizaos-plugin-neynar-search
+git add -A && git commit -m "..."
+git push origin master
+git tag v0.1.2 && git push origin v0.1.2
+
+# 4. Switch engine back to the git dependency
+cd /root/agents-ecosystem/engine
+# Edit package.json:
+#   "@elizaos/plugin-neynar-search": "github:xavier-arosemena/elizaos-plugin-neynar-search"
+pnpm install
+```
+
+### Development cycle
+
+1. Edit plugin source in `elizaos-plugin-neynar-search/src/`
+2. Test with `link:` dependency in the engine project
+3. Commit, tag, push to GitHub
+4. Switch engine back to `github:` dependency
+5. Run `pnpm install` in the engine to pull the latest version
 
 ---
 
