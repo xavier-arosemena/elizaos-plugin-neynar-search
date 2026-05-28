@@ -126,3 +126,50 @@ export interface NeynarNotificationsResponse {
     parent_cast?: any;
   }[];
 }
+
+// =============================================================================
+// Like action types
+// =============================================================================
+
+/** Configuration for the LIKE_FARCASTER action */
+export interface LikeConfig {
+  /** Neynar API key (required) */
+  apiKey: string;
+  /** Neynar signer UUID (required for write operations) */
+  signerUuid: string;
+  /** Maximum likes per 24h rolling window (default: 270) */
+  maxDailyLikes: number;
+  /** Min delay between like API calls in ms (default: 3000) */
+  minDelayMs: number;
+  /** Max delay between like API calls in ms (default: 5000) */
+  maxDelayMs: number;
+  /** Path to the liked-casts state file */
+  likedStatePath: string;
+  /** How many recent casts to fetch per author for extra likes (default: 5) */
+  extraCastsPerAuthor: number;
+}
+
+/** Persisted state tracking likes across cycles */
+export interface LikeState {
+  /** Set of cast hashes that have been liked, hash → timestamp */
+  likedHashes: Record<string, number>;
+  /** Rolling counter for the current 24h window */
+  dailyCount: number;
+  /** Timestamp of the first like in the current window (epoch ms) */
+  windowStart: number;
+  /** ISO timestamp of last LIKE cycle */
+  lastCycleAt: string;
+  /** Current batch number in this 24h window */
+  batchNumber: number;
+}
+
+/** Result of a single LIKE cycle batch */
+export interface LikeCycleResult {
+  totalAttempted: number;
+  totalLiked: number;
+  totalFailed: number;
+  scoutCastsLiked: number;
+  extraCastsLiked: number;
+  dailyBudgetRemaining: number;
+  batchBudgetUsed: number;
+}

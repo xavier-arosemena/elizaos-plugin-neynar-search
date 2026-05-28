@@ -354,3 +354,161 @@ export async function searchAllKeywords(
 
   return all;
 }
+
+// =============================================================================
+// Write operations — LIKE / REACTION endpoints
+// =============================================================================
+
+/**
+ * Like a single Farcaster cast by its hash.
+ *
+ * POST /v2/farcaster/reactions
+ * Body: { signer_uuid, reaction_type: "like", target: castHash }
+ * ~5 credits per call (estimated).
+ *
+ * Returns true on success (2xx), false on any error.
+ * On 429 (rate-limited), backs off 2s and retries once.
+ */
+export async function likeCast(
+  apiKey: string,
+  signerUuid: string,
+  castHash: string
+): Promise<boolean> {
+  const url = `${NEYNAR_BASE}/v2/farcaster/reactions`;
+  const startTime = Date.now();
+
+  elizaLogger.info(
+    `[LIKE] likeCast hash=${castHash} — POST /v2/farcaster/reactions`
+  );
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "api_key": apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        signer_uuid: signerUuid,
+        reaction_type: "like",
+        target: castHash,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    const duration = Date.now() - startTime;
+
+    if (res.status === 429) {
+      elizaLogger.warn(
+        `[LIKE] likeCast RATE-LIMITED hash=${castHash} — backing off 2s for retry`
+      );
+      await sleep(2000);
+
+      const retry = await fetch(url, {
+        method: "POST",
+        headers: {
+          "api_key": apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          signer_uuid: signerUuid,
+          reaction_type: "like",
+          target: castHash,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+
+      const retryDuration = Date.now() - startTime;
+
+      if (retry.ok) {
+        elizaLogger.success(
+          `[LIKE] likeCast SUCCESS hash=${castHash} — status=${retry.status} (retry, ${retryDuration}ms, ~5 credits)`
+        );
+        return true;
+      }
+
+      elizaLogger.warn(
+        `[LIKE] likeCast FAILED hash=${castHash} — ${retry.status} ${retry.statusText} (retry, ${retryDuration}ms)`
+      );
+      return false;
+    }
+
+    if (res.ok) {
+      elizaLogger.success(
+        `[LIKE] likeCast SUCCESS hash=${castHash} — status=${res.status} (${duration}ms, ~5 credits)`
+      );
+      return true;
+    }
+
+    elizaLogger.warn(
+      `[LIKE] likeCast FAILED hash=${castHash} — ${res.status} ${res.statusText} (${duration}ms)`
+    );
+    return false;
+  } catch (err: any) {
+    const duration = Date.now() - startTime;
+    elizaLogger.warn(
+      `[LIKE] likeCast ERROR hash=${castHash} — ${err.message} (${duration}ms)`
+    );
+    return false;
+  }
+}
+
+/**
+ * Like multiple Farcaster casts with randomized delay between each.
+ *
+ * Iterates through `castHashes` in order, calling likeCast() for each
+ * with a randomized delay of `minDelayMs`–`maxDelayMs` between calls.
+ * Stops early if `maxCount` likes have been attempted.
+ *
+ * Returns a summary with counts and the list of successfully liked hashes.
+ */
+export async function batchLikeCasts(
+  apiKey: string,
+  signerUuid: string,
+  castHashes: string[],
+  minDelayMs: number = 3000,
+  maxDelayMs: number = 5000,
+  maxCount: number = 50
+): Promise<{ liked: number; failed: number; likedHashes: string[] }> {
+  const startTime = Date.now();
+  const targets = castHashes.slice(0, maxCount);
+
+  elizaLogger.info(
+    `[LIKE] batchLikeCasts START — ${targets.length} targets (of ${castHashes.length} available), ` +
+    `max=${maxCount}, delay=${minDelayMs}-${maxDelayMs}ms`
+  );
+
+  let liked = 0;
+  let failed = 0;
+  const likedHashes: string[] = [];
+
+  for (let i = 0; i < targets.length; i++) {
+    const hash = targets[i];
+    const success = await likeCast(apiKey, signerUuid, hash);
+
+    if (success) {
+      liked++;
+      likedHashes.push(hash);
+    } else {
+      failed++;
+    }
+
+    // Randomized delay between calls (not after the last one)
+    if (i < targets.length - 1) {
+      const delay = Math.floor(Math.random() * (maxDelayMs - minDelayMs + 1)) + minDelayMs;
+      elizaLogger.debug(
+        `[LIKE] batchLikeCasts progress — ${i + 1}/${targets.length} processed, ` +
+        `liked=${liked} failed=${failed}, next delay=${delay}ms`
+      );
+      await sleep(delay);
+    }
+  }
+
+  const totalDuration = Date.now() - startTime;
+  elizaLogger.success(
+    `[LIKE] batchLikeCasts COMPLETE — liked=${liked} failed=${failed} ` +
+    `(${totalDuration}ms, avg ${Math.round(totalDuration / targets.length)}ms/cast)`
+  );
+
+  return { liked, failed, likedHashes };
+}
