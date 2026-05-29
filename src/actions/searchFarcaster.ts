@@ -149,9 +149,10 @@ async function extractKeywordsFromKnowledge(runtime: IAgentRuntime): Promise<str
     // Use Tier 2 profile monitoring instead for person-specific tracking.
     
     // Pattern 2: Vector column headers — only match at start of line or after pipe (table cell boundaries)
-    const vectorMatches = content.match(/(?:^|\|)\s*(?:Vector de Ataque|Industrial|Energy|Strategic|Rationalism)[:\s]+([^\n|]{2,})/gmi) || [];
+    // [fix 2026-05-29]: 'Vector de Ataque' → 'Attack Vector' (English), strip leading pipes from captured terms
+    const vectorMatches = content.match(/(?:^|\|)\s*(?:Attack Vector|Industrial|Energy|Strategic|Rationalism)[:\s]+([^\n|]{2,})/gmi) || [];
     vectorMatches.forEach(m => {
-      const terms = m.split(/[&,]/).map(t => t.trim());
+      const terms = m.split(/[&,]/).map(t => t.trim().replace(/^\|+\s*/, ""));
       terms.forEach(term => {
         if (term.length > 3 && term.length < 40) {
           keywords.add(term);
@@ -735,9 +736,12 @@ export const searchFarcasterAction: Action = {
     // 5. Tier 1: Topic Discovery — every cycle, cached
     const tier1Casts = await runTier1(apiKey, keywords, cycleNumber);
 
-    // 6. Tier 2: Profile Monitoring — every 2 cycles
+    // 6. Tier 2: Profile Monitoring — every 4 cycles (~2x/day) [optimized 2026-05-29]
+    // Was every 2 cycles (~4x/day) — reduced to save ~3,600 Neynar credits/day.
+    // Tier 1 keyword search catches most relevant posts from monitored profiles;
+    // Tier 2 profile monitoring is redundant coverage for high-frequency accounts.
     let tier2Casts: NeynarCast[] = [];
-    if (cycleNumber % 2 === 0) {
+    if (cycleNumber % 4 === 0) {
       const monitoredProfiles = await resolveMonitoredProfiles(apiKey, runtime, config);
       tier2Casts = await runTier2(apiKey, monitoredProfiles);
     } else {
