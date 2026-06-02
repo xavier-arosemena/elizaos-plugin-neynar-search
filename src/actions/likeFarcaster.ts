@@ -11,7 +11,7 @@
 //   6. Resolve short hashes → full hashes + author FIDs via lookupCast
 //   7. Filter already-liked hashes (perma-set dedup)
 //   8. LIKE Scout-identified casts first (prioritized)
-//   9. If batch budget remains, get extra recent casts from same authors
+//   9. If batch budget remains, get extra casts from followers of cast authors
 //  10. Filter already-liked, LIKE extra casts
 //  11. Update and persist LikeState
 //  12. Return formatted cycle results via callback
@@ -21,7 +21,7 @@
 
 import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from "@elizaos/core";
 import { elizaLogger } from "@elizaos/core";
-import { batchLikeCasts, getUserCasts, lookupCast } from "../lib/neynarClient.js";
+import { batchLikeCasts, getUserCasts, lookupCast, getFollowersPage } from "../lib/neynarClient.js";
 import {
   loadLikeState,
   saveLikeState,
@@ -42,7 +42,8 @@ const DEFAULT_MAX_DAILY_LIKES = 270;
 const DEFAULT_MIN_DELAY_MS = 3000;
 const DEFAULT_MAX_DELAY_MS = 5000;
 const DEFAULT_BATCHES_PER_DAY = 12;
-const DEFAULT_EXTRA_PER_AUTHOR = 5;
+const DEFAULT_FOLLOWERS_PER_AUTHOR = 20;
+const DEFAULT_CASTS_PER_FOLLOWER = 3;
 const BATCH_RANDOMIZE_FRACTION = 0.2; // ±20% jitter on batch size
 const MAX_MEMORIES_TO_SCAN = 200;
 
@@ -66,7 +67,7 @@ function createLikeConfig(runtime: IAgentRuntime): LikeConfig {
       Number(runtime.getSetting("LIKER_MAX_DELAY_MS")) || DEFAULT_MAX_DELAY_MS,
     likedStatePath: runtime.getSetting("LIKER_STATE_PATH") || "",
     extraCastsPerAuthor:
-      Number(runtime.getSetting("LIKER_EXTRA_PER_AUTHOR")) || DEFAULT_EXTRA_PER_AUTHOR,
+      Number(runtime.getSetting("LIKER_EXTRA_PER_AUTHOR")) || DEFAULT_FOLLOWERS_PER_AUTHOR,
   };
 }
 
@@ -215,14 +216,21 @@ async function resolveShortHashes(
 }
 
 /**
- * Get extra unliked cast hashes from a set of author FIDs.
- * Fetches recent casts for each author via getUserCasts, deduplicates,
- * filters out already-liked hashes, and returns up to `budget` hashes.
+ * Get extra unliked cast hashes from **followers** of the cast authors.
+ * Instead of fetching more casts from the same author (which duplicates
+ * content), this discovers new authors by fetching followers of each
+ * cast author and collecting their recent casts.
+ *
+ * This builds network presence by engaging with the author's audience
+ * rather than spamming the same author's content.
+ *
+ * Fetches up to `maxFollowersPerAuthor` followers per author, then
+ * up to `maxCastsPerFollower` recent casts per follower.
  */
 async function getExtraCastHashes(
   apiKey: string,
   authorFids: number[],
-  extraPerAuthor: number,
+  maxFollowersPerAuthor: number,
   state: LikeState,
   budget: number
 ): Promise<string[]> {
@@ -231,35 +239,68 @@ async function getExtraCastHashes(
   const uniqueFids = [...new Set(authorFids)];
   const candidates: string[] = [];
   const seenHashes = new Set<string>();
+  const MAX_CASTS_PER_FOLLOWER = DEFAULT_CASTS_PER_FOLLOWER;
 
   elizaLogger.info(
-    `[LIKE] Extra discovery — ${uniqueFids.length} unique authors, ` +
-    `fetching ${extraPerAuthor} recent casts each, budget=${budget}`
+    `[LIKE] Extra discovery (followers) — ${uniqueFids.length} unique authors, ` +
+    `fetching up to ${maxFollowersPerAuthor} followers each, ` +
+    `up to ${MAX_CASTS_PER_FOLLOWER} casts per follower, budget=${budget}`
   );
 
   for (const fid of uniqueFids) {
     try {
-      const casts = await getUserCasts(apiKey, fid, extraPerAuthor);
+      // Fetch followers of the cast author (1 page)
+      const { fids: followerFids } = await getFollowersPage(
+        apiKey,
+        fid,
+        maxFollowersPerAuthor
+      );
 
-      let newForAuthor = 0;
-      for (const cast of casts) {
-        if (!seenHashes.has(cast.hash) && !isHashLiked(state, cast.hash)) {
-          seenHashes.add(cast.hash);
-          candidates.push(cast.hash);
-          newForAuthor++;
-        }
+      if (followerFids.length === 0) {
+        elizaLogger.debug(`[LIKE] Extra discovery fid=${fid}: no followers returned`);
+        continue;
       }
 
       elizaLogger.debug(
-        `[LIKE] Extra discovery fid=${fid}: ${casts.length} fetched, ${newForAuthor} new unliked`
+        `[LIKE] Extra discovery fid=${fid}: ${followerFids.length} followers fetched`
       );
+
+      // Fetch recent casts from each follower
+      for (const followerFid of followerFids) {
+        try {
+          const casts = await getUserCasts(apiKey, followerFid, MAX_CASTS_PER_FOLLOWER);
+
+          let newForFollower = 0;
+          for (const cast of casts) {
+            if (!seenHashes.has(cast.hash) && !isHashLiked(state, cast.hash)) {
+              seenHashes.add(cast.hash);
+              candidates.push(cast.hash);
+              newForFollower++;
+            }
+          }
+
+          if (newForFollower > 0) {
+            elizaLogger.debug(
+              `[LIKE] Extra discovery follower fid=${followerFid}: ` +
+              `${casts.length} fetched, ${newForFollower} new unliked`
+            );
+          }
+        } catch (err) {
+          elizaLogger.debug(
+            `[LIKE] Error fetching casts for follower fid=${followerFid}: ${String(err)}`
+          );
+        }
+
+        // Early exit if we have enough buffer (2x budget)
+        if (candidates.length >= budget * 2) break;
+      }
     } catch (err) {
-      elizaLogger.warn(`[LIKE] Error fetching casts for fid=${fid}: ${String(err)}`);
+      elizaLogger.warn(`[LIKE] Error fetching followers for fid=${fid}: ${String(err)}`);
     }
 
     // Early exit if we have enough buffer (2x budget)
     if (candidates.length >= budget * 2) {
-      elizaLogger.debug("[LIKE] Extra discovery — early exit: enough candidates collected");
+      elizaLogger.debug("[LIKE] Extra discovery (followers) — early exit: enough candidates collected");
       break;
     }
   }
@@ -267,7 +308,7 @@ async function getExtraCastHashes(
   const result = candidates.slice(0, budget);
 
   elizaLogger.info(
-    `[LIKE] Extra candidates — ${candidates.length} unliked found, taking ${result.length} for batch`
+    `[LIKE] Extra discovery (followers) — ${candidates.length} unliked found, taking ${result.length} for batch`
   );
 
   return result;
@@ -322,7 +363,8 @@ export const likeFarcasterAction: Action = {
 
   description:
     "Like Farcaster posts identified by The Scout's discovery queue, " +
-    "plus additional posts from the same authors to build network presence. " +
+    "plus additional posts from followers of those authors (extra discovery " +
+    "via follower network) to build network presence. " +
     "Respects daily budget (configurable via LIKER_MAX_DAILY, default 270), " +
     "per-batch limits (~22/batch), and rate limits (3-5s delay between likes). " +
     "Tracks liked hashes permanently to avoid duplicates.",
@@ -493,7 +535,7 @@ export const likeFarcasterAction: Action = {
       }
 
       // ===================================================================
-      // 8. Extra casts — fill remaining batch budget from same authors
+      // 8. Extra casts — fill remaining batch budget from followers of authors
       // ===================================================================
       const extraBudget = Math.max(0, batchBudget - scoutLiked);
       let extraLiked = 0;

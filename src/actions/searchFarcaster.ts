@@ -551,10 +551,41 @@ async function runTier1(
   return casts;
 }
 
+// ---------------------------------------------------------------------------
+// Stale FID tracker — prevents wasted API calls on deleted/private accounts
+// ---------------------------------------------------------------------------
+
+const STALE_FID_THRESHOLD = 3;
+const _staleFidFailures = new Map<number, number>();
+
+function isStaleFid(fid: number): boolean {
+  const failures = _staleFidFailures.get(fid) ?? 0;
+  return failures >= STALE_FID_THRESHOLD;
+}
+
+function recordFidFetchResult(fid: number, castCount: number): void {
+  if (castCount > 0) {
+    _staleFidFailures.set(fid, 0);
+  } else {
+    const current = _staleFidFailures.get(fid) ?? 0;
+    _staleFidFailures.set(fid, current + 1);
+    if (current + 1 >= STALE_FID_THRESHOLD) {
+      elizaLogger.warn(
+        `[neynar-search] Stale FID detected: ${fid} — ` +
+        `returned 0 casts for ${current + 1} consecutive cycles. ` +
+        `Will skip in future cycles.`
+      );
+    }
+  }
+}
+
 /**
  * Tier 2: Profile monitoring — fetch recent casts from monitored profiles.
  * Resolves @handles from target_list.md into FIDs at runtime.
  * Runs every 2 cycles. Uses getUserCasts (~38 credits per call).
+ *
+ * Automatically detects stale FIDs (deleted/private accounts) and skips
+ * them after STALE_FID_THRESHOLD consecutive empty results.
  */
 async function runTier2(
   apiKey: string,
@@ -572,14 +603,27 @@ async function runTier2(
   const allCasts: NeynarCast[] = [];
 
   for (const profile of profiles) {
+    // Skip stale FIDs to avoid wasted API calls
+    if (isStaleFid(profile.fid)) {
+      elizaLogger.info(
+        `[neynar-search] Tier 2: Skipping stale FID ${profile.fid} (@${profile.handle}) — ` +
+        `failed ${_staleFidFailures.get(profile.fid)} consecutive cycles`
+      );
+      continue;
+    }
+
     try {
       const casts = await getUserCasts(apiKey, profile.fid, 5);
+      recordFidFetchResult(profile.fid, casts.length);
+
       elizaLogger.info(
         `[neynar-search] Tier 2: @${profile.handle} (fid=${profile.fid}, ${profile.followerCount.toLocaleString()} followers) — ${casts.length} recent casts`
       );
       allCasts.push(...casts);
     } catch (err) {
       elizaLogger.warn(`[neynar-search] Tier 2: Error fetching @${profile.handle}: ${String(err)}`);
+      // Network errors count as failures too
+      recordFidFetchResult(profile.fid, 0);
     }
 
     // Small delay between profile fetches

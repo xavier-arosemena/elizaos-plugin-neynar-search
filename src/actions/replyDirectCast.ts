@@ -44,6 +44,9 @@ const DEFAULT_DAILY_REPLY_LIMIT = 10;
 // State file path (relative to engine cwd)
 const DM_STATE_PATH = path.resolve(process.cwd(), "data", "dm_priority_state.json");
 
+// Minimum interval between DM processing cycles (6 hours = 4 cycles/day max)
+const DM_MIN_CYCLE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
 // Max entries in dedup arrays before trimming
 const MAX_DEDUP_ENTRIES = 200;
 
@@ -476,6 +479,26 @@ export const replyDirectCastAction: Action = {
       );
       return false;
     }
+
+    // Cooldown check: enforce minimum interval between cycles (default 6h)
+    try {
+      if (fs.existsSync(DM_STATE_PATH)) {
+        const raw = fs.readFileSync(DM_STATE_PATH, "utf-8");
+        const state = JSON.parse(raw) as DmPriorityState;
+        const lastFetch = new Date(state.lastFetchTimestamp).getTime();
+        const elapsed = Date.now() - lastFetch;
+        if (!isNaN(lastFetch) && elapsed < DM_MIN_CYCLE_INTERVAL_MS) {
+          elizaLogger.info(
+            `${TAG} Cooldown active — last cycle was ${Math.round(elapsed / 60000)}m ago ` +
+            `(min ${DM_MIN_CYCLE_INTERVAL_MS / 60000}m). Skipping.`
+          );
+          return false;
+        }
+      }
+    } catch (err) {
+      elizaLogger.warn(`${TAG} Cooldown check error (proceeding anyway): ${err}`);
+    }
+
     return true;
   },
 

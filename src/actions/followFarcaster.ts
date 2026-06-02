@@ -51,8 +51,8 @@ export const followFarcasterAction: Action = {
     "count and pattern matching.",
 
   validate: async (runtime: IAgentRuntime): Promise<boolean> => {
-    const apiKey = runtime.getSetting("NEYNAR_API_KEY");
-    const signerUuid = runtime.getSetting("NEYNAR_SIGNER_UUID");
+    const apiKey = runtime.getSetting("FARCASTER_NEYNAR_API_KEY");
+    const signerUuid = runtime.getSetting("FARCASTER_NEYNAR_SIGNER_UUID");
 
     elizaLogger.info(
       `[NeynarDebug] FOLLOW_FARCASTER: validate — apiKey=${!!apiKey} signerUuid=${!!signerUuid}`
@@ -60,7 +60,7 @@ export const followFarcasterAction: Action = {
 
     if (!apiKey || !signerUuid) {
       elizaLogger.warn(
-        "[NeynarDebug] FOLLOW_FARCASTER: missing required settings (NEYNAR_API_KEY, NEYNAR_SIGNER_UUID)"
+        "[NeynarDebug] FOLLOW_FARCASTER: missing required settings (FARCASTER_NEYNAR_API_KEY, FARCASTER_NEYNAR_SIGNER_UUID)"
       );
       return false;
     }
@@ -79,8 +79,8 @@ export const followFarcasterAction: Action = {
     // -----------------------------------------------------------------------
     // Phase 1: Load config
     // -----------------------------------------------------------------------
-    const apiKey = runtime.getSetting("NEYNAR_API_KEY")!;
-    const signerUuid = runtime.getSetting("NEYNAR_SIGNER_UUID")!;
+    const apiKey = runtime.getSetting("FARCASTER_NEYNAR_API_KEY")!;
+    const signerUuid = runtime.getSetting("FARCASTER_NEYNAR_SIGNER_UUID")!;
     const maxFollowsPerCycle = parseInt(
       runtime.getSetting("FOLLOW_MAX_PER_CYCLE") || "5"
     );

@@ -38,9 +38,9 @@ export const unfollowFarcasterAction: Action = {
     "(up to UNFOLLOW_MAX_PER_CYCLE).",
 
   validate: async (runtime: IAgentRuntime): Promise<boolean> => {
-    const apiKey = runtime.getSetting("NEYNAR_API_KEY");
-    const signerUuid = runtime.getSetting("NEYNAR_SIGNER_UUID");
-    const archonFid = runtime.getSetting("ARCHON_FID");
+    const apiKey = runtime.getSetting("FARCASTER_NEYNAR_API_KEY");
+    const signerUuid = runtime.getSetting("FARCASTER_NEYNAR_SIGNER_UUID");
+    const archonFid = runtime.getSetting("FARCASTER_FID");
 
     elizaLogger.info(
       `[NeynarDebug] UNFOLLOW_FARCASTER: validate — ` +
@@ -50,7 +50,7 @@ export const unfollowFarcasterAction: Action = {
     if (!apiKey || !signerUuid || !archonFid) {
       elizaLogger.warn(
         "[NeynarDebug] UNFOLLOW_FARCASTER: missing required settings " +
-        "(NEYNAR_API_KEY, NEYNAR_SIGNER_UUID, ARCHON_FID)"
+        "(FARCASTER_NEYNAR_API_KEY, FARCASTER_NEYNAR_SIGNER_UUID, FARCASTER_FID)"
       );
       return false;
     }
@@ -69,9 +69,9 @@ export const unfollowFarcasterAction: Action = {
     // -----------------------------------------------------------------------
     // Phase 1: Load config
     // -----------------------------------------------------------------------
-    const apiKey = runtime.getSetting("NEYNAR_API_KEY")!;
-    const signerUuid = runtime.getSetting("NEYNAR_SIGNER_UUID")!;
-    const archonFid = parseInt(runtime.getSetting("ARCHON_FID")!, 10);
+    const apiKey = runtime.getSetting("FARCASTER_NEYNAR_API_KEY")!;
+    const signerUuid = runtime.getSetting("FARCASTER_NEYNAR_SIGNER_UUID")!;
+    const archonFid = parseInt(runtime.getSetting("FARCASTER_FID")!, 10);
     const maxUnfollows = parseInt(
       runtime.getSetting("UNFOLLOW_MAX_PER_CYCLE") || "5"
     );
