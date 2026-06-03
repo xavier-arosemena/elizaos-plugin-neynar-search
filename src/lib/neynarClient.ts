@@ -668,6 +668,83 @@ export async function batchLikeCasts(
 }
 
 // =============================================================================
+// Conversation / Replies — for commenter discovery (Issue #8 Wider Liking)
+// =============================================================================
+
+/**
+ * Fetch a cast with its conversation context (replies/commenters).
+ *
+ * GET /v2/farcaster/cast/conversation
+ * Parameters: cast_hash (required), reply_depth (default 1), limit (default 25)
+ *
+ * Returns the cast with its direct replies, which allows extraction of
+ * commenter FIDs for the commenter discovery layer.
+ * ~5-10 credits per call (estimated).
+ */
+export async function getCastConversation(
+  apiKey: string,
+  castHash: string,
+  replyDepth: number = 1,
+  limit: number = 25
+): Promise<{ cast: NeynarCast | null; replies: NeynarCast[] }> {
+  const url = new URL(`${NEYNAR_BASE}/v2/farcaster/cast/conversation`);
+  url.searchParams.set("cast_hash", castHash);
+  url.searchParams.set("reply_depth", String(replyDepth));
+  url.searchParams.set("limit", String(limit));
+
+  const startTime = Date.now();
+
+  try {
+    const res = await fetch(url.toString(), {
+      method: "GET",
+      headers: neynarHeaders(apiKey),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    const duration = Date.now() - startTime;
+
+    if (!res.ok) {
+      if (res.status === 402) {
+        elizaLogger.info(
+          `[NEYNAR-DEBUG] getCastConversation: 402 — endpoint not available on current plan`
+        );
+      } else {
+        elizaLogger.warn(
+          `[NEYNAR-DEBUG] getCastConversation FAILED for ${castHash.slice(0, 14)}...: ${res.status} ${res.statusText} (${duration}ms)`
+        );
+      }
+      return { cast: null, replies: [] };
+    }
+
+    const data = (await res.json()) as {
+      conversation?: {
+        cast?: NeynarCast;
+        replies?: {
+          count?: number;
+          casts?: NeynarCast[];
+        };
+      };
+    };
+
+    const cast = data?.conversation?.cast ?? null;
+    const replies = data?.conversation?.replies?.casts ?? [];
+
+    elizaLogger.info(
+      `[NEYNAR-DEBUG] getCastConversation: ${castHash.slice(0, 14)}... — ` +
+      `${replies.length} replies, ${duration}ms, ~5-10 credits`
+    );
+
+    return { cast, replies };
+  } catch (err: any) {
+    const duration = Date.now() - startTime;
+    elizaLogger.warn(
+      `[NEYNAR-DEBUG] getCastConversation ERROR for ${castHash.slice(0, 14)}...: ${err.message} (${duration}ms)`
+    );
+    return { cast: null, replies: [] };
+  }
+}
+
+// =============================================================================
 // Follow / Unfollow API wrappers
 // =============================================================================
 

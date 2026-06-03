@@ -21,7 +21,7 @@
 
 import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from "@elizaos/core";
 import { elizaLogger } from "@elizaos/core";
-import { batchLikeCasts, getUserCasts, lookupCast, getFollowersPage } from "../lib/neynarClient.js";
+import { batchLikeCasts, getUserCasts, lookupCast, getFollowersPage, getCastConversation, searchAllKeywords } from "../lib/neynarClient.js";
 import {
   loadLikeState,
   saveLikeState,
@@ -47,6 +47,15 @@ const DEFAULT_CASTS_PER_FOLLOWER = 3;
 const BATCH_RANDOMIZE_FRACTION = 0.2; // ±20% jitter on batch size
 const MAX_MEMORIES_TO_SCAN = 200;
 
+// Wider Discovery (Issue #8) defaults
+const DEFAULT_COMMENTER_DISCOVERY_ENABLED = true;
+const DEFAULT_MAX_COMMENTERS_PER_CAST = 5;
+const DEFAULT_MAX_CASTS_PER_COMMENTER = 3;
+const DEFAULT_KEYWORD_DISCOVERY_ENABLED = true;
+const DEFAULT_KEYWORD_DISCOVERY_MAX_KEYWORDS = 3;
+const DEFAULT_CHANNEL_DISCOVERY_ENABLED = false;
+const DEFAULT_MAX_CASTS_PER_CHANNEL = 5;
+
 // ---------------------------------------------------------------------------
 // Config Builder
 // ---------------------------------------------------------------------------
@@ -68,6 +77,28 @@ function createLikeConfig(runtime: IAgentRuntime): LikeConfig {
     likedStatePath: runtime.getSetting("LIKER_STATE_PATH") || "",
     extraCastsPerAuthor:
       Number(runtime.getSetting("LIKER_EXTRA_PER_AUTHOR")) || DEFAULT_FOLLOWERS_PER_AUTHOR,
+
+    // Wider Discovery (Issue #8)
+    commenterDiscoveryEnabled:
+      runtime.getSetting("LIKER_COMMENTER_DISCOVERY_ENABLED") !== "false"
+        ? true
+        : DEFAULT_COMMENTER_DISCOVERY_ENABLED,
+    maxCommentersPerCast:
+      Number(runtime.getSetting("LIKER_MAX_COMMENTERS_PER_CAST")) || DEFAULT_MAX_COMMENTERS_PER_CAST,
+    maxCastsPerCommenter:
+      Number(runtime.getSetting("LIKER_MAX_CASTS_PER_COMMENTER")) || DEFAULT_MAX_CASTS_PER_COMMENTER,
+    keywordDiscoveryEnabled:
+      runtime.getSetting("LIKER_KEYWORD_DISCOVERY_ENABLED") !== "false"
+        ? true
+        : DEFAULT_KEYWORD_DISCOVERY_ENABLED,
+    keywordDiscoveryMaxKeywords:
+      Number(runtime.getSetting("LIKER_KEYWORD_DISCOVERY_MAX_KEYWORDS")) || DEFAULT_KEYWORD_DISCOVERY_MAX_KEYWORDS,
+    channelDiscoveryEnabled:
+      runtime.getSetting("LIKER_CHANNEL_DISCOVERY_ENABLED") === "true"
+        ? true
+        : DEFAULT_CHANNEL_DISCOVERY_ENABLED,
+    maxCastsPerChannel:
+      Number(runtime.getSetting("LIKER_MAX_CASTS_PER_CHANNEL")) || DEFAULT_MAX_CASTS_PER_CHANNEL,
   };
 }
 
@@ -314,6 +345,192 @@ async function getExtraCastHashes(
   return result;
 }
 
+// =============================================================================
+// Wider Discovery Layer 2 — Commenter Discovery (Issue #8)
+// =============================================================================
+
+/**
+ * Extract unique commenter FIDs from the conversation (replies) of a set of
+ * scout-identified casts. Used by the commenter discovery layer to find new
+ * authors to engage with.
+ */
+async function getCommenterFidsFromScoutCasts(
+  apiKey: string,
+  castUrls: string[],
+  hashMap: Map<string, { fullHash: string; fid: number; handle: string }>,
+  maxCommentersPerCast: number
+): Promise<number[]> {
+  const commenterFids = new Set<number>();
+
+  elizaLogger.info(
+    `[LIKE] Commenter discovery — scanning up to ${castUrls.length} scout cast conversations, ` +
+    `max ${maxCommentersPerCast} commenters per cast`
+  );
+
+  for (const castUrl of castUrls) {
+    const castInfo = hashMap.get(castUrl);
+    if (!castInfo) continue;
+
+    try {
+      const { replies } = await getCastConversation(apiKey, castInfo.fullHash, 1, 25);
+
+      if (replies.length === 0) {
+        elizaLogger.debug(`[LIKE] Commenter discovery: no replies for ${castInfo.fullHash.slice(0, 14)}...`);
+        continue;
+      }
+
+      let commentersAdded = 0;
+      for (const reply of replies) {
+        if (commentersAdded >= maxCommentersPerCast) break;
+        const replyFid = reply.author?.fid;
+        if (replyFid && replyFid !== castInfo.fid && !commenterFids.has(replyFid)) {
+          commenterFids.add(replyFid);
+          commentersAdded++;
+        }
+      }
+
+      elizaLogger.debug(
+        `[LIKE] Commenter discovery: ${replies.length} replies for ` +
+        `${castInfo.handle}:${castInfo.fullHash.slice(0, 8)}... → ` +
+        `${commentersAdded} new commenter FIDs added`
+      );
+    } catch (err) {
+      elizaLogger.debug(
+        `[LIKE] Commenter discovery: error fetching conversation for ${castInfo.fullHash.slice(0, 14)}...: ${String(err)}`
+      );
+    }
+  }
+
+  elizaLogger.info(
+    `[LIKE] Commenter discovery complete — ${commenterFids.size} unique commenter FIDs found`
+  );
+
+  return [...commenterFids];
+}
+
+/**
+ * Get extra unliked cast hashes from **commenters** of the scout-identified casts.
+ * Fetches the conversation (replies) for each scout cast, extracts unique
+ * commenter FIDs, then fetches their recent casts and filters out already-liked ones.
+ *
+ * This builds network presence by engaging with people who are actively
+ * discussing the same topics as the scout-identified content.
+ */
+async function getExtraCastHashesFromCommenters(
+  apiKey: string,
+  commenterFids: number[],
+  maxCastsPerCommenter: number,
+  state: LikeState,
+  budget: number
+): Promise<string[]> {
+  if (budget <= 0 || commenterFids.length === 0) return [];
+
+  const uniqueFids = [...new Set(commenterFids)];
+  const candidates: string[] = [];
+  const seenHashes = new Set<string>();
+
+  elizaLogger.info(
+    `[LIKE] Extra discovery (commenters) — ${uniqueFids.length} unique commenters, ` +
+    `up to ${maxCastsPerCommenter} casts each, budget=${budget}`
+  );
+
+  for (const commenterFid of uniqueFids) {
+    try {
+      const casts = await getUserCasts(apiKey, commenterFid, maxCastsPerCommenter);
+
+      let newForCommenter = 0;
+      for (const cast of casts) {
+        if (!seenHashes.has(cast.hash) && !isHashLiked(state, cast.hash)) {
+          seenHashes.add(cast.hash);
+          candidates.push(cast.hash);
+          newForCommenter++;
+        }
+      }
+
+      if (newForCommenter > 0) {
+        elizaLogger.debug(
+          `[LIKE] Extra discovery commenter fid=${commenterFid}: ` +
+          `${casts.length} fetched, ${newForCommenter} new unliked`
+        );
+      }
+    } catch (err) {
+      elizaLogger.debug(
+        `[LIKE] Error fetching casts for commenter fid=${commenterFid}: ${String(err)}`
+      );
+    }
+
+    // Early exit if we have enough buffer (2x budget)
+    if (candidates.length >= budget * 2) break;
+  }
+
+  const result = candidates.slice(0, budget);
+
+  elizaLogger.info(
+    `[LIKE] Extra discovery (commenters) — ${candidates.length} unliked found, taking ${result.length} for batch`
+  );
+
+  return result;
+}
+
+// =============================================================================
+// Wider Discovery Layer 3 — Keyword Discovery (Issue #8)
+// =============================================================================
+
+/**
+ * Search for relevant casts using a subset of the agent's keyword corpus
+ * during the like cycle. This finds content that may have been missed by the
+ * Scout or published between scout cycles.
+ *
+ * Uses `searchAllKeywords` with a small keyword limit to control credit costs
+ * (~149 credits per keyword). Only runs if keywordDiscoveryEnabled is true
+ * and the config has max keywords > 0.
+ */
+async function getRelevantCastsByKeywords(
+  apiKey: string,
+  keywords: string[],
+  maxKeywords: number,
+  state: LikeState,
+  budget: number
+): Promise<string[]> {
+  if (budget <= 0 || keywords.length === 0 || maxKeywords <= 0) return [];
+
+  // Use only the configured number of keywords to control costs
+  const activeKeywords = keywords.slice(0, maxKeywords);
+
+  elizaLogger.info(
+    `[LIKE] Keyword discovery — ${activeKeywords.length}/${keywords.length} keywords, ` +
+    `budget=${budget}, ~${activeKeywords.length * 149} estimated credits`
+  );
+
+  try {
+    const casts = await searchAllKeywords(apiKey, activeKeywords, 5, 3);
+
+    if (casts.length === 0) {
+      elizaLogger.info("[LIKE] Keyword discovery — no casts found");
+      return [];
+    }
+
+    // Filter already-liked and collect unliked hashes
+    const unlikedHashes: string[] = [];
+    for (const cast of casts) {
+      if (!isHashLiked(state, cast.hash)) {
+        unlikedHashes.push(cast.hash);
+      }
+    }
+
+    const result = unlikedHashes.slice(0, budget);
+
+    elizaLogger.info(
+      `[LIKE] Keyword discovery — ${casts.length} total, ${unlikedHashes.length} unliked, taking ${result.length} for batch`
+    );
+
+    return result;
+  } catch (err) {
+    elizaLogger.warn(`[LIKE] Keyword discovery error: ${String(err)}`);
+    return [];
+  }
+}
+
 /**
  * Calculate per-batch budget with randomization to avoid patterns.
  * Returns a value between 1 and remaining budget.
@@ -363,10 +580,13 @@ export const likeFarcasterAction: Action = {
 
   description:
     "Like Farcaster posts identified by The Scout's discovery queue, " +
-    "plus additional posts from followers of those authors (extra discovery " +
-    "via follower network) to build network presence. " +
+    "plus additional discovery layers (Issue #8): " +
+    "Layer 1 — followers of cast authors, " +
+    "Layer 2 — commenters on scout-identified casts, " +
+    "Layer 3 — keyword-relevant content search. " +
     "Respects daily budget (configurable via LIKER_MAX_DAILY, default 270), " +
     "per-batch limits (~22/batch), and rate limits (3-5s delay between likes). " +
+    "Each discovery layer is independently configurable via env vars. " +
     "Tracks liked hashes permanently to avoid duplicates.",
 
   validate: async (runtime: IAgentRuntime): Promise<boolean> => {
@@ -469,10 +689,12 @@ export const likeFarcasterAction: Action = {
       // ===================================================================
       let scoutFullHashes: string[] = [];
       let authorFids: number[] = [];
+      // hashMap is declared here for use by commenter discovery (Layer 2)
+      let hashMap = new Map<string, { fullHash: string; fid: number; handle: string }>();
 
       if (castUrls.length > 0) {
         // Pass full Warpcast URLs — lookupCast auto-detects and uses type=url
-        const hashMap = await resolveShortHashes(config.apiKey, castUrls);
+        hashMap = await resolveShortHashes(config.apiKey, castUrls);
 
         // Build arrays from resolved data
         for (const [, info] of hashMap) {
@@ -535,14 +757,16 @@ export const likeFarcasterAction: Action = {
       }
 
       // ===================================================================
-      // 8. Extra casts — fill remaining batch budget from followers of authors
+      // 8. Layer 1 — Extra casts from followers of authors (existing)
       // ===================================================================
-      const extraBudget = Math.max(0, batchBudget - scoutLiked);
+      let remainingBudget = Math.max(0, batchBudget - scoutLiked);
       let extraLiked = 0;
+      let commenterLiked = 0;
+      let keywordLiked = 0;
 
-      if (extraBudget > 0 && authorFids.length > 0) {
+      if (remainingBudget > 0 && authorFids.length > 0) {
         elizaLogger.info(
-          `[LIKE] Seeking extra casts — budget=${extraBudget}, ` +
+          `[LIKE] Layer 1 (followers) — budget=${remainingBudget}, ` +
           `${authorFids.length} author FIDs available`
         );
 
@@ -551,14 +775,14 @@ export const likeFarcasterAction: Action = {
           authorFids,
           config.extraCastsPerAuthor,
           likeState,
-          extraBudget
+          remainingBudget
         );
 
         if (extraHashes.length > 0) {
-          const extraCount = Math.min(extraBudget, extraHashes.length);
+          const extraCount = Math.min(remainingBudget, extraHashes.length);
 
           elizaLogger.info(
-            `[LIKE] Liking extra casts — ${extraCount} of ${extraHashes.length} candidates`
+            `[LIKE] Liking extra casts (followers) — ${extraCount} of ${extraHashes.length} candidates`
           );
 
           const extraResult = await batchLikeCasts(
@@ -572,7 +796,7 @@ export const likeFarcasterAction: Action = {
 
           extraLiked = extraResult.liked;
 
-          // Update state with extra likes
+          // Update state with follower likes
           for (const hash of extraResult.likedHashes) {
             recordLikedHash(likeState, hash);
           }
@@ -580,13 +804,138 @@ export const likeFarcasterAction: Action = {
 
           totalLiked += extraLiked;
           totalFailed += extraResult.failed;
+          remainingBudget -= extraLiked;
         } else {
-          elizaLogger.info("[LIKE] No extra candidates found after filtering");
+          elizaLogger.info("[LIKE] Layer 1 (followers) — no candidates found after filtering");
         }
-      } else if (extraBudget > 0) {
+      } else if (remainingBudget > 0) {
         elizaLogger.info(
-          `[LIKE] Cannot fetch extra casts — budget=${extraBudget} but no author FIDs available`
+          `[LIKE] Layer 1 (followers) — budget=${remainingBudget} but no author FIDs available`
         );
+      }
+
+      // ===================================================================
+      // 8b. Layer 2 — Extra casts from commenters of scout casts (Issue #8)
+      // ===================================================================
+      if (remainingBudget > 0 && config.commenterDiscoveryEnabled && castUrls.length > 0 && hashMap.size > 0) {
+        elizaLogger.info(
+          `[LIKE] Layer 2 (commenters) — budget=${remainingBudget}, ` +
+          `config: maxCommentersPerCast=${config.maxCommentersPerCast}, ` +
+          `maxCastsPerCommenter=${config.maxCastsPerCommenter}`
+        );
+
+        // Extract commenter FIDs from scout cast conversations
+        const commenterFids = await getCommenterFidsFromScoutCasts(
+          config.apiKey,
+          castUrls,
+          hashMap,
+          config.maxCommentersPerCast
+        );
+
+        if (commenterFids.length > 0) {
+          const commenterHashes = await getExtraCastHashesFromCommenters(
+            config.apiKey,
+            commenterFids,
+            config.maxCastsPerCommenter,
+            likeState,
+            remainingBudget
+          );
+
+          if (commenterHashes.length > 0) {
+            const commenterCount = Math.min(remainingBudget, commenterHashes.length);
+
+            elizaLogger.info(
+              `[LIKE] Liking extra casts (commenters) — ${commenterCount} of ${commenterHashes.length} candidates`
+            );
+
+            const commenterResult = await batchLikeCasts(
+              config.apiKey,
+              config.signerUuid,
+              commenterHashes,
+              config.minDelayMs,
+              config.maxDelayMs,
+              commenterCount
+            );
+
+            commenterLiked = commenterResult.liked;
+
+            // Update state with commenter likes
+            for (const hash of commenterResult.likedHashes) {
+              recordLikedHash(likeState, hash);
+            }
+            likeState.dailyCount += commenterLiked;
+
+            totalLiked += commenterLiked;
+            totalFailed += commenterResult.failed;
+            remainingBudget -= commenterLiked;
+          } else {
+            elizaLogger.info("[LIKE] Layer 2 (commenters) — no unliked casts found");
+          }
+        } else {
+          elizaLogger.info("[LIKE] Layer 2 (commenters) — no commenter FIDs extracted");
+        }
+      } else if (remainingBudget > 0 && !config.commenterDiscoveryEnabled) {
+        elizaLogger.info("[LIKE] Layer 2 (commenters) — disabled by config");
+      }
+
+      // ===================================================================
+      // 8c. Layer 3 — Relevant keyword discovery (Issue #8)
+      // ===================================================================
+      if (remainingBudget > 0 && config.keywordDiscoveryEnabled && config.keywordDiscoveryMaxKeywords > 0) {
+        elizaLogger.info(
+          `[LIKE] Layer 3 (keywords) — budget=${remainingBudget}, ` +
+          `maxKeywords=${config.keywordDiscoveryMaxKeywords}`
+        );
+
+        // Use the default keywords from the Scout's corpus
+        const defaultKeywords = [
+          "EU energy", "European sovereignty", "European Parliament",
+          "Austrian economics", "fiscal responsibility", "EU immigration",
+          "European right", "crypto regulation EU", "European defense",
+          "EU competitiveness", "re-industrialization", "MiCA",
+          "Bitcoin Europe", "geopolitical Europe", "energy prices Europe",
+        ];
+
+        const keywordHashes = await getRelevantCastsByKeywords(
+          config.apiKey,
+          defaultKeywords,
+          config.keywordDiscoveryMaxKeywords,
+          likeState,
+          remainingBudget
+        );
+
+        if (keywordHashes.length > 0) {
+          const keywordCount = Math.min(remainingBudget, keywordHashes.length);
+
+          elizaLogger.info(
+            `[LIKE] Liking casts (keywords) — ${keywordCount} of ${keywordHashes.length} candidates`
+          );
+
+          const keywordResult = await batchLikeCasts(
+            config.apiKey,
+            config.signerUuid,
+            keywordHashes,
+            config.minDelayMs,
+            config.maxDelayMs,
+            keywordCount
+          );
+
+          keywordLiked = keywordResult.liked;
+
+          // Update state with keyword likes
+          for (const hash of keywordResult.likedHashes) {
+            recordLikedHash(likeState, hash);
+          }
+          likeState.dailyCount += keywordLiked;
+
+          totalLiked += keywordLiked;
+          totalFailed += keywordResult.failed;
+          remainingBudget -= keywordLiked;
+        } else {
+          elizaLogger.info("[LIKE] Layer 3 (keywords) — no relevant cast hashes found");
+        }
+      } else if (remainingBudget > 0 && !config.keywordDiscoveryEnabled) {
+        elizaLogger.info("[LIKE] Layer 3 (keywords) — disabled by config");
       }
 
       // ===================================================================
@@ -598,12 +947,13 @@ export const likeFarcasterAction: Action = {
       // ===================================================================
       // 10. Build result summary
       // ===================================================================
+      const totalExtra = extraLiked + commenterLiked + keywordLiked;
       const result: LikeCycleResult = {
-        totalAttempted: scoutBudget + (extraBudget > 0 ? extraBudget : 0),
+        totalAttempted: scoutBudget + Math.max(0, batchBudget - scoutLiked),
         totalLiked,
         totalFailed,
         scoutCastsLiked: scoutLiked,
-        extraCastsLiked: extraLiked,
+        extraCastsLiked: totalExtra,
         dailyBudgetRemaining: getRemainingBudget(likeState, config.maxDailyLikes),
         batchBudgetUsed: totalLiked,
       };
@@ -614,7 +964,7 @@ export const likeFarcasterAction: Action = {
       elizaLogger.success(
         `[LIKE] ===== ${totalLiked} posts liked ===== ` +
         `batch #${likeState.batchNumber}: ` +
-        `scout=${scoutLiked}+extra=${extraLiked}, ` +
+        `scout=${scoutLiked}+followers=${extraLiked}+commenters=${commenterLiked}+keywords=${keywordLiked}, ` +
         `daily=${likeState.dailyCount}/${config.maxDailyLikes}, ` +
         `remaining=${result.dailyBudgetRemaining}, ` +
         `failed=${totalFailed}, ` +

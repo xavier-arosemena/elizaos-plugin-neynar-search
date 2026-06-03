@@ -209,6 +209,27 @@ export interface LikeConfig {
   likedStatePath: string;
   /** How many recent casts to fetch per author for extra likes (default: 5) */
   extraCastsPerAuthor: number;
+
+  // ==========================================================================
+  // Wider Discovery Layers (Issue #8)
+  // ==========================================================================
+
+  /** Enable commenter discovery: like casts from users who replied to scout-identified casts (default: true) */
+  commenterDiscoveryEnabled: boolean;
+  /** Maximum number of commenters to check per scout cast (default: 5) */
+  maxCommentersPerCast: number;
+  /** Maximum casts to fetch per discovered commenter (default: 3) */
+  maxCastsPerCommenter: number;
+
+  /** Enable keyword discovery: search for relevant casts using keywords during the like cycle (default: true) */
+  keywordDiscoveryEnabled: boolean;
+  /** Maximum number of keywords to use in discovery search (default: 3, saves ~149 credits per keyword) */
+  keywordDiscoveryMaxKeywords: number;
+
+  /** Enable channel feed discovery: like casts from the same channel as scout-identified casts (default: false) */
+  channelDiscoveryEnabled: boolean;
+  /** Maximum number of casts to fetch per channel (default: 5) */
+  maxCastsPerChannel: number;
 }
 
 /** Persisted state tracking likes across cycles */
