@@ -241,4 +241,6 @@ export const followFarcasterAction: Action = {
 - Errors: ${result.errors.length > 0 ? result.errors.join("; ") : "none"}`,
     });
   },
+
+  examples: [],
 };

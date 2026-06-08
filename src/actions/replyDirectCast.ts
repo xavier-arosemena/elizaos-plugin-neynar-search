@@ -15,7 +15,7 @@
 // =============================================================================
 
 import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from "@elizaos/core";
-import { elizaLogger, stringToUuid } from "@elizaos/core";
+import { elizaLogger, stringToUuid, generateText, embed, ModelClass } from "@elizaos/core";
 import * as fs from "fs";
 import * as path from "path";
 import { getNotifications, lookupUserByFid, sendDirectCast } from "../lib/neynarClient.js";
@@ -278,9 +278,10 @@ async function scoreKnowledgeRelevance(
   dmText: string
 ): Promise<number> {
   try {
-    // Use messageManager's embedding search to find related knowledge
+    // Embed the DM text first, then use it for similarity search
+    const embedding = await embed(runtime, dmText);
     const searchMemories = await runtime.messageManager.searchMemoriesByEmbedding(
-      dmText,
+      embedding,
       {
         roomId: runtime.agentId,
         count: 3,
@@ -383,15 +384,15 @@ async function generateDmReply(
 
     const context = contextPieces.join("\n");
 
-    // Use runtime to generate response via the LLM provider
-    const response = await runtime.completion({
+    // Use generateText to generate response via the LLM provider
+    const response = await generateText({
+      runtime,
       context,
+      modelClass: ModelClass.LARGE,
       stop: [],
-      max_context_length: 4096,
-      max_response_length: 320,
     });
 
-    const reply = (response?.text?.trim?.() || response?.trim?.() || "").trim();
+    const reply = (response || "").trim();
 
     if (!reply) {
       elizaLogger.warn(`${TAG} generateDmReply: empty response for @${senderHandle}`);

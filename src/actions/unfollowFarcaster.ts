@@ -197,4 +197,6 @@ export const unfollowFarcasterAction: Action = {
 - Errors: ${result.errors.length > 0 ? result.errors.join("; ") : "none"}`,
     });
   },
+
+  examples: [],
 };

@@ -23,7 +23,7 @@
 // =============================================================================
 
 import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from "@elizaos/core";
-import { elizaLogger } from "@elizaos/core";
+import { elizaLogger, generateText, ModelClass } from "@elizaos/core";
 import * as fs from "fs";
 import * as path from "path";
 import { replyToCast } from "../lib/neynarClient.js";
@@ -471,22 +471,16 @@ INSTRUCTIONS:
 Reply with ONLY the reply text, no additional commentary:`;
 
   try {
-    // Use runtime.completion() to generate via the agent's LLM
-    const response = await runtime.completion({
+    // Use generateText() to generate via the agent's LLM
+    const response = await generateText({
       runtime,
       context: prompt,
       stop: [], // Let the model decide when to stop
-      modelClass: "large", // Use the most capable model available
+      modelClass: ModelClass.LARGE, // Use the most capable model available
     });
 
     // Extract and clean the response text
-    let replyText = "";
-    if (typeof response === "string") {
-      replyText = response.trim();
-    } else if (response && typeof response === "object") {
-      // Handle structured response if runtime returns one
-      replyText = String(response)?.trim() || "";
-    }
+    let replyText = (response || "").trim();
 
     // Fallback in case of empty response
     if (!replyText) {
@@ -912,6 +906,8 @@ export const replyFarcasterAction: Action = {
       return false;
     }
   },
+
+  examples: [],
 };
 
 export default replyFarcasterAction;
