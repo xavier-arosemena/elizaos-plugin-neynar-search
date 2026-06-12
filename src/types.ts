@@ -1,5 +1,5 @@
 // =============================================================================
-// types.ts — Core data shapes for @elizaos/plugin-neynar-search
+// types.ts — Core data shapes for elizaos-plugin-neynar-search
 // =============================================================================
 
 /** Raw author object returned by Neynar cast endpoints */

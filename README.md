@@ -1,4 +1,4 @@
-# @elizaos/plugin-neynar-search
+# elizaos-plugin-neynar-search
 
 **Farcaster engagement discovery, engagement (likes), and relationship management (follow/unfollow) for ElizaOS agents via the Neynar REST API.** 
 
@@ -92,7 +92,7 @@ Designed for a **publishing agent** (e.g. Archon Europae) that maintains a healt
 pnpm install
 
 # Or as a published package:
-pnpm add @elizaos/plugin-neynar-search
+pnpm add elizaos-plugin-neynar-search
 ```
 
 ---
@@ -161,7 +161,7 @@ All optional settings have sensible defaults. Override any of them via environme
 
 ```json
 {
-  "plugins": ["@elizaos/plugin-neynar-search"],
+  "plugins": ["elizaos-plugin-neynar-search"],
   "clients": ["direct"],
   "settings": {
     "secrets": {
@@ -183,7 +183,7 @@ All optional settings have sensible defaults. Override any of them via environme
 
 ```json
 {
-  "plugins": ["@elizaos/plugin-neynar-search"],
+  "plugins": ["elizaos-plugin-neynar-search"],
   "clients": ["farcaster", "direct"],
   "settings": {
     "secrets": {
@@ -628,7 +628,7 @@ This triggers the `UNFOLLOW_FARCASTER` action, which fetches 1 page of Archon's 
 ### 1. Add the dependency
 
 ```bash
-pnpm add @elizaos/plugin-neynar-search@github:xavier-arosemena/elizaos-plugin-neynar-search
+pnpm add elizaos-plugin-neynar-search@github:xavier-arosemena/elizaos-plugin-neynar-search
 ```
 
 Or add it manually to `package.json`:
@@ -636,7 +636,7 @@ Or add it manually to `package.json`:
 ```json
 {
   "dependencies": {
-    "@elizaos/plugin-neynar-search": "github:xavier-arosemena/elizaos-plugin-neynar-search"
+    "elizaos-plugin-neynar-search": "github:xavier-arosemena/elizaos-plugin-neynar-search"
   }
 }
 ```
@@ -644,10 +644,10 @@ Or add it manually to `package.json`:
 ### 2. `src/index.ts` (engine)
 
 ```typescript
-import { neynarSearchPlugin } from "@elizaos/plugin-neynar-search";
+import { neynarSearchPlugin } from "elizaos-plugin-neynar-search";
 
 // In createAgent(), add to plugins array:
-const needsNeynarPlugin = pluginStrings.includes("@elizaos/plugin-neynar-search");
+const needsNeynarPlugin = pluginStrings.includes("elizaos-plugin-neynar-search");
 
 plugins: [
   bootstrapPlugin,
@@ -677,7 +677,7 @@ This plugin is developed in its own repository at `elizaos-plugin-neynar-search/
 # 1. Temporarily switch to a local symlink
 cd /root/agents-ecosystem/engine
 # Edit package.json:
-#   "@elizaos/plugin-neynar-search": "link:/root/elizaos-plugin-neynar-search"
+#   "elizaos-plugin-neynar-search": "link:/root/elizaos-plugin-neynar-search"
 pnpm install
 
 # 2. Edit files in /root/elizaos-plugin-neynar-search/ — changes reflect immediately
@@ -691,7 +691,7 @@ git tag v0.1.2 && git push origin v0.1.2
 # 4. Switch engine back to the git dependency
 cd /root/agents-ecosystem/engine
 # Edit package.json:
-#   "@elizaos/plugin-neynar-search": "github:xavier-arosemena/elizaos-plugin-neynar-search"
+#   "elizaos-plugin-neynar-search": "github:xavier-arosemena/elizaos-plugin-neynar-search"
 pnpm install
 ```
 

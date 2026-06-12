@@ -1,7 +1,7 @@
 {
-  "name": "@elizaos/plugin-neynar-search",
-  "version": "0.1.0",
-  "description": "Read-only Farcaster engagement discovery via Neynar REST API for ElizaOS agents",
+  "name": "elizaos-plugin-neynar-search",
+  "version": "0.3.0",
+  "description": "Farcaster engagement discovery, like, reply, and follow/unfollow actions via Neynar REST API for ElizaOS agents",
   "type": "module",
   "main": "src/index.ts",
   "exports": {
@@ -20,6 +20,10 @@
     "social",
     "discovery"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xavier-arosemena/elizaos-plugin-neynar-search.git"
+  },
   "author": "agents-ecosystem",
   "license": "MIT",
   "peerDependencies": {

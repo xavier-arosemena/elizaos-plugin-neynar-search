@@ -1,5 +1,5 @@
 // =============================================================================
-// @elizaos/plugin-neynar-search — ElizaOS plugin entry point
+// elizaos-plugin-neynar-search — ElizaOS plugin entry point
 //
 // Registers six actions:
 //   SEARCH_FARCASTER    — Topic discovery and opportunity scoring
@@ -19,7 +19,7 @@ import { followFarcasterAction } from "./actions/followFarcaster.js";
 import { unfollowFarcasterAction } from "./actions/unfollowFarcaster.js";
 
 export const neynarSearchPlugin: Plugin = {
-  name: "@elizaos/plugin-neynar-search",
+  name: "elizaos-plugin-neynar-search",
   description:
     "Farcaster engagement discovery, like, reply, and follow/unfollow actions " +
     "via Neynar REST API. Provides SEARCH_FARCASTER (scout/topic discovery), " +
